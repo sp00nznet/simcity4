@@ -53,9 +53,24 @@ The game is built on Maxis's GZCOM framework: every system is a class behind a
 
 ## Function catalog (disasm32, no IDA)
 
-`disasm32.py work\sc4.exe --seed-functions work\vtable_seeds.json`: first pass 38,582
-seeds, discovery round 2 adds 6,390 jmp/call targets. Final count: see the CHANGELOG
-entry for the first lift. Not yet scored against a reference (ROADMAP).
+`disasm32.py work\sc4.exe --seed-functions work\vtable_seeds.json`, 7.5 minutes:
+
+| | |
+|---|---|
+| Seeds, first pass | 38,582 |
+| Discovery rounds | 7 (+6,390, +154, +29, ..., +14) |
+| Functions | **50,604** (89 thunks, 17,371 leaves); 3,402 aliases, 358 EH funclets |
+| Instructions | 6,362,002 |
+| Byte coverage | 6,585,200 of 6,787,072 (**97.0%** of `.text`) |
+
+Not yet scored against a reference (ROADMAP).
+
+## The lift
+
+`run_lift.py --all`, 172 s: **50,766 functions lifted, 0 errors**, 136 branch targets
+added beyond the catalog, 548 with no clean terminator. 10.2 million lines of C in
+127 files (490 MB). The OEP closure alone is only 300 functions: the CRT reaches
+the rest through `_initterm`'s constructor table and the GZCOM vtables.
 
 ## What this means for the recomp
 
@@ -66,3 +81,23 @@ entry for the first lift. Not yet scored against a reference (ROADMAP).
   community's reverse-engineering of the GZCOM interfaces.
 - **Size**: the largest PC target so far by code (6.8 MB `.text`, vs KotOR's 3.4 MB).
   Builds go to netlab (REPO_RULES section 10).
+
+## Bring-up so far (2026-10-28)
+
+`build\sc4.exe --run --headless --watchdog 60`, full lift built on netlab (clang-cl, 70 min cold):
+
+1. The CRT, its static constructors and the GZCOM framework start in lifted code.
+2. **Fixed:** a fault at 0x0098E9A6 (a null view object). `--original` (the shipping code
+   under the same host, `oracle.c`) faulted at the same address, so the lift was right and
+   the host was wrong: its headless `GetDC(NULL)` returned 0, SC4 read a 0-bit screen depth
+   from it (0x0098ADE0) and picked no video mode. Headless now hands out a screen-compatible
+   memory DC.
+3. DirectDraw's exclusive fullscreen fails headless (`SetDisplayMode` E_NOTIMPL); the game
+   says "Could not initialize Direct Draw" and falls back to its software driver on a GDI DIB
+   section. It creates `GDriverWindow--Software` at 1024x768.
+4. **Now:** `cGZFramework` startup (0x0087AF13) passes phases 1 and 3, then the app init at
+   phase 4 (vtable 0x00AC3090 slot +0xA8 = 0x00879FBC) fails: it walks the registered
+   components by priority and one refuses (exit at 0x0087A03A). `WinMain` returns -1.
+   Next: name that component (hook 0x0087A03A, print `edi` and its vtable).
+
+The host prints each framework phase as it changes (`[host] framework phase N`).

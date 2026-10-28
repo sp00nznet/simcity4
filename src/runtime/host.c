@@ -23,6 +23,7 @@
 
 #include "native32.h"
 #include "recomp_trace.h"
+#include "oracle.h"
 
 extern const uint32_t sc4_entry_va;  /* recomp_dispatch.c */
 
@@ -33,6 +34,7 @@ static DWORD g_watchdog_s;
 static int   g_modeswitch;   /* --modeswitch: let ChangeDisplaySettingsA through */
 static int   g_gamma;        /* --gamma: let SetDeviceGammaRamp through */
 static int   g_headless;
+static int   g_original;   /* --original: the shipping machine code (oracle.c) */
 
 /* ---- calls that reach outside the window -----------------------------------
  * ChangeDisplaySettingsA resizes the user's real screen and SetDeviceGammaRamp
@@ -93,8 +95,10 @@ static void shim_GetCommandLineA(void) {
  * A shim runs holding the machine, and a window call can wait on another
  * thread; the call runs with the machine let go, as native32's bridge does for
  * every unshimmed import (kotor's startup deadlock). */
-#define UNLOCKED(call) do { uint32_t esp_ = g_esp; mach_leave(); \
-    call; DWORD err_ = GetLastError(); mach_enter(); \
+#define UNLOCKED(call) do { uint32_t esp_ = g_esp; \
+    if (g_original) oracle_release(); else mach_leave(); \
+    call; DWORD err_ = GetLastError(); \
+    if (g_original) oracle_take(); else mach_enter(); \
     g_esp = esp_; SetLastError(err_); } while (0)
 
 static void shim_CreateWindowExA(void) {
@@ -121,9 +125,15 @@ static void shim_ShowWindow(void) {
     g_esp += 4 + 2 * 4;
 }
 
+/* Headless, GetDC(NULL) must not hand out the real screen (kotor painted the
+ * desktop black through it), but SC4 reads the screen's depth from it
+ * (0x0098ADE0): 0 there means no video mode and a null view at 0x0098E9A6.
+ * A memory DC compatible with the screen answers GetDeviceCaps the same and
+ * draws nowhere. ponytail: never deleted; it is made a few times at startup. */
 static void shim_GetDC(void) {
     HWND w = (HWND)(uintptr_t)ARG(0);
-    g_eax = (g_headless && !w) ? 0 : (uint32_t)(uintptr_t)GetDC(w);
+    g_eax = (g_headless && !w) ? (uint32_t)(uintptr_t)CreateCompatibleDC(NULL)
+                               : (uint32_t)(uintptr_t)GetDC(w);
     g_esp += 4 + 1 * 4;
 }
 
@@ -289,6 +299,27 @@ static LONG CALLBACK crash(EXCEPTION_POINTERS* ep) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+/* cGZFramework (pointer at 0x00B540AC) stamps how far its startup got at +0xCC
+ * (0x0087AF13): 1 COM and plugins, 3-4 the app's own init, 5-6 running. Each
+ * change is a milestone line. ponytail: polled every 5 ms, so a phase that
+ * lasts less than that can be missed; hook 0x0087AF13 if that matters. */
+static DWORD WINAPI phase_watch(LPVOID unused) {
+    (void)unused;
+    int last = -1;
+    for (;;) {
+        uint32_t fw = MEM32(0x00B540ACu);
+        int ph = fw ? (int)MEM32(fw + 0xCC) : -1;
+        if (ph != last) {
+            printf("[host] framework phase %d", ph);
+            if (fw) printf(" (framework 0x%08X, vtable 0x%08X)", fw, MEM32(fw));
+            printf("\n");
+            fflush(stdout);
+            last = ph;
+        }
+        Sleep(5);
+    }
+}
+
 static DWORD WINAPI watchdog(LPVOID unused) {
     (void)unused;
     Sleep(g_watchdog_s * 1000);
@@ -314,6 +345,7 @@ int main(int argc, char** argv) {
         if (!strcmp(argv[i], "--run")) run = 1;
         else if (!strcmp(argv[i], "--sound")) sound = 1;
         else if (!strcmp(argv[i], "--headless")) g_headless = 1;
+        else if (!strcmp(argv[i], "--original")) g_original = 1;
         else if (!strcmp(argv[i], "--modeswitch")) g_modeswitch = 1;
         else if (!strcmp(argv[i], "--gamma")) g_gamma = 1;
         else if (!strcmp(argv[i], "--exe") && i + 1 < argc) exe = argv[++i];
@@ -323,7 +355,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--native-trace")) native32_trace_native = 1;
         else if (!strcmp(argv[i], "--callbacks")) native32_trace_callbacks = 1;
         else {
-            printf("usage: sc4 [--run] [--headless] [--sound] [--modeswitch] [--gamma] [--exe work\\sc4.exe] [--game game]\n"
+            printf("usage: sc4 [--run] [--headless] [--sound] [--modeswitch] [--gamma] [--original] [--exe work\\sc4.exe] [--game game]\n"
                    "           [--args \"-intro:off -w\"] [--watchdog S] [--native-trace] [--callbacks]\n");
             recomp_trace_help();
             return argv[i][1] == 'h' || argv[i][2] == 'h' ? 0 : 1;
@@ -335,6 +367,15 @@ int main(int argc, char** argv) {
     _snprintf(g_guest_exe, sizeof g_guest_exe - 1, "%s\\SimCity 4.exe", apps);
     _snprintf(g_guest_cmdline, sizeof g_guest_cmdline - 1, "\"%s\" %s", g_guest_exe, game_args);
     SetDllDirectoryA(apps);
+
+    if (g_original) {
+        /* The same shims, folder, mute and watchdog around the original code. */
+        if (!SetCurrentDirectoryA(apps)) { fprintf(stderr, "cannot enter %s\n", apps); return 1; }
+        CoInitialize(NULL);
+        if (!sound) mute_process();
+        if (g_watchdog_s) CloseHandle(CreateThread(NULL, 0, watchdog, NULL, 0, NULL));
+        return oracle_run(exe_full, SC4_IMAGE_BASE, g_shims, (int)(sizeof g_shims / sizeof g_shims[0]), NULL, 0);
+    }
 
     native32_init();
     AddVectoredExceptionHandler(0, crash);
@@ -356,6 +397,7 @@ int main(int argc, char** argv) {
     if (!m) { fprintf(stderr, "cannot mute the process audio session; pass --sound to run with sound\n"); return 1; }
     printf("  audio: %s\n", sound ? "on (--sound)" : m == 2 ? "muted (no audio device)" : "muted (--sound to hear it)");
     if (g_watchdog_s) CloseHandle(CreateThread(NULL, 0, watchdog, NULL, 0, NULL));
+    CloseHandle(CreateThread(NULL, 0, phase_watch, NULL, 0, NULL));
     printf("  entering 0x%08X\n\n", sc4_entry_va);
     fflush(stdout);
     native32_call_guest(sc4_entry_va, 0, NULL);

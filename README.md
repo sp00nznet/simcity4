@@ -13,15 +13,16 @@ the lifter runs on your machine and writes the C into a gitignored folder.
 ## Status
 
 **P0, bring-up. Nothing plays yet.** The Steam wrapper comes off, the function
-catalog is built with pcrecomp's own tools (no IDA), and the lift and host are
-being brought up. See [docs/RECON.md](docs/RECON.md) for what the binary is.
+catalog is built with pcrecomp's own tools (no IDA), the whole game lifts with
+no errors, and the recompiled program runs its startup as far as the game's own
+init. See [docs/RECON.md](docs/RECON.md) for what the binary is.
 
 | Area | State |
 |---|---|
 | Steam wrapper | Removed statically (needs pcrecomp#149) |
-| Function catalog | disasm32 seeded with 18,437 vtable methods (docs/RECON.md) |
-| Lift | In progress |
-| Host (`build/sc4.exe`, 32-bit, `native32`) | Written, not yet booted |
+| Function catalog | 50,604 functions, 97% of `.text`, from disasm32 seeded with 18,437 vtable methods |
+| Lift | 50,766 functions, 0 lift errors, 10.2M lines of C |
+| Host (`build/sc4.exe`, 32-bit, `native32`) | Boots the CRT and the GZCOM framework, makes the software renderer's window, then stops in the app's init (docs/RECON.md, Bring-up) |
 
 ## Screenshots
 
@@ -66,6 +67,7 @@ build\sc4.exe                      dry run: map and bind the image, then stop
 build\sc4.exe --run                run (muted; --sound to hear it)
 build\sc4.exe --run --headless     no window on screen, message boxes printed
 build\sc4.exe --run --args "-intro:off -w -d:Software"   the game's own switches
+build\sc4.exe --run --original     the shipping machine code under the same host (to compare)
 ```
 
 ## Building from source
