@@ -13,6 +13,9 @@ versions follow [SemVer](https://semver.org/).
 - `--original` runs the shipping code under the same host (kotor's `oracle.c`).
 - The host prints each `cGZFramework` startup phase as it changes, and every guest C++
   throw with its type (`--trace-init` traces the component init loop).
+- `--snap DIR` saves the software renderer's frames as BMPs (headless screenshots);
+  `--spy VA` logs one lifted function's indirect calls.
+- The game boots headless to its main menu, matching the original's frames.
 - Headless runs and `--private-docs` keep the game's Documents folder in `work\docs`.
 
 ### Fixed
@@ -26,6 +29,10 @@ versions follow [SemVer](https://semver.org/).
   to native32's eh32, and the 38 functions with catch blocks get landing pads. The game's
   own "Couldn't open file" for the optional `Graphics Options.sgr` is caught again.
 - 17 callbacks the catalog missed (the software renderer's span routines) are seeded.
+- No audio device: `-audio:off` is added, or the sound manager's update writes through
+  null (the original too).
+- The software renderer's generated span code runs natively with the guest's registers
+  (needs pcrecomp native32 generated-code support).
 - Headless `GetDC(NULL)` returns a screen-compatible memory DC instead of 0: SC4 read
   a 0-bit display from it and crashed on a null view (0x0098E9A6).
 

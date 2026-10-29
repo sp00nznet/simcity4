@@ -233,6 +233,56 @@ static void shim_SwapBuffers(void) {
     g_esp += 4 + 1 * 4;
 }
 
+/* The software driver presents with BitBlt from its DIB section to the
+ * window, in 16-row strips (0x008F3640): a strip at y = 0 starts a frame.
+ * --snap DIR writes the whole source surface as DIR\frame_NNNNN.bmp every
+ * --snap-every frames (default 100), so a headless run has real screenshots.
+ * ponytail: BMP, converted outside (ffmpeg); a --record pipe like kotor's when
+ * video is wanted. */
+static const char* g_snap_dir;
+static LONG g_snap_every = 100;
+
+static void snap_surface(HDC src, LONG n) {
+    HBITMAP bm = (HBITMAP)GetCurrentObject(src, OBJ_BITMAP);
+    DIBSECTION ds;
+    if (!bm || GetObjectA(bm, sizeof ds, &ds) != sizeof ds || !ds.dsBm.bmBits) return;
+    int w = ds.dsBm.bmWidth, h = ds.dsBm.bmHeight, bpp = ds.dsBm.bmBitsPixel;
+    if (bpp != 32 && bpp != 24 && bpp != 16) return;
+    char path[MAX_PATH];
+    _snprintf(path, sizeof path - 1, "%s\\frame_%05ld.bmp", g_snap_dir, n);
+    path[sizeof path - 1] = 0;
+    FILE* f = fopen(path, "wb");
+    if (!f) return;
+    /* Written as 32-bit top-down whatever the source is: GetDIBits converts. */
+    BITMAPINFOHEADER bi = { sizeof bi, w, -abs(h), 1, 32, BI_RGB };
+    DWORD size = (DWORD)w * abs(h) * 4;
+    uint8_t* px = (uint8_t*)malloc(size);
+    HDC dc = CreateCompatibleDC(NULL);
+    if (px && GetDIBits(dc, bm, 0, abs(h), px, (BITMAPINFO*)&bi, DIB_RGB_COLORS)) {
+        BITMAPFILEHEADER fh = { 0x4D42, sizeof fh + sizeof bi + size, 0, 0, sizeof fh + sizeof bi };
+        fwrite(&fh, sizeof fh, 1, f);
+        fwrite(&bi, sizeof bi, 1, f);
+        fwrite(px, 1, size, f);
+        printf("[host] frame %ld -> %s (%dx%d, %d bpp source)\n", n, path, w, abs(h), bpp);
+    }
+    DeleteDC(dc);
+    free(px);
+    fclose(f);
+}
+
+static void shim_BitBlt(void) {
+    uint32_t a[9];
+    for (int i = 0; i < 9; i++) a[i] = ARG(i);
+    if (a[2] == 0) {                           /* y = 0: a new frame */
+        LONG n = InterlockedIncrement(&g_frames);
+        if (n == 1 || n == 60 || n % 1000 == 0) printf("[host] frame %ld presented (software)\n", n);
+        if (g_snap_dir && (n == 1 || n % g_snap_every == 0)) snap_surface((HDC)(uintptr_t)a[5], n);
+    }
+    g_eax = BitBlt((HDC)(uintptr_t)a[0], (int)a[1], (int)a[2], (int)a[3], (int)a[4],
+                   (HDC)(uintptr_t)a[5], (int)a[6], (int)a[7], a[8]);
+    g_esp += 4 + 9 * 4;
+}
+
 static void shim_TerminateProcess(void) {
     HANDLE h = (HANDLE)(uintptr_t)ARG(0);
     UINT code = ARG(1);
@@ -259,6 +309,7 @@ static native32_shim_t g_shims[] = {
     { "MessageBoxA", shim_MessageBoxA },
     { "SetWindowPos", shim_SetWindowPos },
     { "SwapBuffers", shim_SwapBuffers },
+    { "BitBlt", shim_BitBlt },
     { "ExitProcess", shim_ExitProcess },
     { "TerminateProcess", shim_TerminateProcess },
     { "ChangeDisplaySettingsA", shim_ChangeDisplaySettingsA },
@@ -304,12 +355,13 @@ static int mute_process(void) {
 }
 
 /* ---- reports ---------------------------------------------------------------- */
-/* --trace-init: every indirect call the framework's component init loop
- * (0x00879FBC) makes, with the component, its vtable and the answer. Each
- * lifted indirect call asks recomp_lookup_manual first, so the spy sits in
- * between without touching the lift; the globals are current inside it
- * (RECOMP_REGS_OUT ran). */
-static int g_trace_init;
+/* --spy VA: every indirect call lifted function VA makes, with `this`, its
+ * vtable, the first two arguments and the answer. --trace-init is --spy
+ * 0x00879FBC, the framework's component init loop. Each lifted indirect call
+ * asks recomp_lookup_manual first, so the spy sits in between without
+ * touching the lift; the globals are current inside it (RECOMP_REGS_OUT ran).
+ * ponytail: lifted targets only, one function at a time; widen when needed. */
+static uint32_t g_spy_func;
 static uint32_t g_spy_va;
 static recomp_func_t g_spy_fn;
 
@@ -318,13 +370,13 @@ static void spy_init_call(void) {
     recomp_func_t fn = g_spy_fn;
     uint32_t a0 = MEM32(g_esp + 4), a1 = MEM32(g_esp + 8);
     fn();
-    printf("[init] 0x%08X this=0x%08X vtable=0x%08X (0x%X, 0x%X) -> 0x%X\n",
+    printf("[spy] 0x%08X this=0x%08X vtable=0x%08X (0x%X, 0x%X) -> 0x%X\n",
            va, self, self ? MEM32(self) : 0, a0, a1, g_eax);
     fflush(stdout);
 }
 
 recomp_func_t recomp_lookup_manual(uint32_t va) {
-    if (g_trace_init && g_cur_func == 0x00879FBCu) {
+    if (g_spy_func && g_cur_func == g_spy_func) {
         recomp_func_t fn = recomp_lookup(va);
         if (fn) { g_spy_va = va; g_spy_fn = fn; return spy_init_call; }
     }
@@ -474,7 +526,15 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--headless")) g_headless = 1;
         else if (!strcmp(argv[i], "--original")) g_original = 1;
         else if (!strcmp(argv[i], "--private-docs")) private_docs = 1;
-        else if (!strcmp(argv[i], "--trace-init")) g_trace_init = 1;
+        else if (!strcmp(argv[i], "--trace-init")) g_spy_func = 0x00879FBCu;
+        else if (!strcmp(argv[i], "--snap") && i + 1 < argc) {
+            static char snap_full[MAX_PATH];     /* the run chdirs into game\Apps */
+            CreateDirectoryA(argv[++i], NULL);
+            GetFullPathNameA(argv[i], MAX_PATH, snap_full, NULL);
+            g_snap_dir = snap_full;
+        }
+        else if (!strcmp(argv[i], "--snap-every") && i + 1 < argc) g_snap_every = strtol(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--spy") && i + 1 < argc) g_spy_func = strtoul(argv[++i], NULL, 16);
         else if (!strcmp(argv[i], "--modeswitch")) g_modeswitch = 1;
         else if (!strcmp(argv[i], "--gamma")) g_gamma = 1;
         else if (!strcmp(argv[i], "--exe") && i + 1 < argc) exe = argv[++i];
@@ -484,7 +544,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--native-trace")) native32_trace_native = 1;
         else if (!strcmp(argv[i], "--callbacks")) native32_trace_callbacks = 1;
         else {
-            printf("usage: sc4 [--run] [--headless] [--sound] [--modeswitch] [--gamma] [--original] [--private-docs] [--trace-init] [--exe work\\sc4.exe] [--game game]\n"
+            printf("usage: sc4 [--run] [--headless] [--sound] [--modeswitch] [--gamma] [--original] [--private-docs] [--trace-init] [--spy VA] [--snap DIR] [--snap-every N] [--exe work\\sc4.exe] [--game game]\n"
                    "           [--args \"-intro:off -w\"] [--watchdog S] [--native-trace] [--callbacks]\n");
             recomp_trace_help();
             return argv[i][1] == 'h' || argv[i][2] == 'h' ? 0 : 1;
@@ -542,6 +602,14 @@ int main(int argc, char** argv) {
     int m = sound ? 1 : mute_process();
     if (!m) { fprintf(stderr, "cannot mute the process audio session; pass --sound to run with sound\n"); return 1; }
     printf("  audio: %s\n", sound ? "on (--sound)" : m == 2 ? "muted (no audio device)" : "muted (--sound to hear it)");
+    /* With no output device DirectSound fails, the sound manager's init never
+     * runs, and its per-frame update writes through the buffer object init
+     * would have made (0x00876C03): SC4 needs -audio:off on such a machine,
+     * the original as much as the lift. */
+    if (m == 2 && !strstr(g_guest_cmdline, "-audio:")) {
+        strncat(g_guest_cmdline, " -audio:off", sizeof g_guest_cmdline - strlen(g_guest_cmdline) - 1);
+        printf("  guest command line %s (no audio device)\n", g_guest_cmdline);
+    }
     if (g_watchdog_s) CloseHandle(CreateThread(NULL, 0, watchdog, NULL, 0, NULL));
     CloseHandle(CreateThread(NULL, 0, phase_watch, NULL, 0, NULL));
     printf("  entering 0x%08X\n\n", sc4_entry_va);

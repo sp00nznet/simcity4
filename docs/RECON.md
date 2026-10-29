@@ -105,7 +105,7 @@ the rest through `_initterm`'s constructor table and the GZCOM vtables.
 5. **Fixed:** the game took its data folder from `GetModuleFileNameW`, fetched with
    `GetProcAddress` (0x00912467) and so not shimmed: it looked for `Graphics Rules.sgr`
    beside the host. `GetProcAddress` now hands out a stand-in that names the guest exe.
-6. **In progress:** the game throws `nSCRes::cParseError` "Couldn't open file
+6. **Fixed:** the game throws `nSCRes::cParseError` "Couldn't open file
    '...\Documents\SimCity 4\Graphics Options.sgr'", an optional file it catches itself.
    SC4 links its C runtime statically, so its `_CxxThrowException` (0x009EF84F) is game code
    that calls `RaiseException`, and Windows never saw the guest's EH frames. `run_lift.py`
@@ -114,10 +114,28 @@ the rest through `_initterm`'s constructor table and the GZCOM vtables.
    `--original` cannot catch it either: Windows refuses SEH handlers outside a loaded image
    when the host is `/NXCOMPAT`, so the oracle stops at the first guest throw.
 
+7. **Fixed:** the main loop's software renderer calls 17 span and blit callbacks that
+   disasm32 missed (named only by `mov reg, offset`); seeded in `run_lift.py`.
+8. **Fixed:** the renderer compiles span code at run time into a `PAGE_EXECUTE_READWRITE`
+   buffer (0x008EC050) and calls it from hand-written MMX (0x008DD8B0) with its inputs in
+   esi/edi/ebp and MMX registers. native32 ran it through the C-ABI bridge, so it read 0.
+   native32 now tracks executable memory the guest allocates and enters it with the whole
+   register file (pcrecomp, `feat/native32-generated-code`).
+9. **Fixed:** with no audio output device, DirectSound fails, the sound manager's init
+   never runs and its per-frame update writes through a null buffer object (0x00876C03).
+   The original does the same; `-audio:off` avoids it and the host adds it when there is
+   no device.
+10. **Now:** the main loop runs and presents frames. The splash screen and the main menu
+   render, and the original code under the same host (`--original`, with an empty
+   `Graphics Options.sgr` in `work\docs\SimCity 4` so it never throws) draws the same
+   frames, cloud streaks included. Speed: about 110 frames a second lifted, 340 original,
+   on the main menu.
+
 Headless runs (and `--private-docs`) keep the game's Documents folder in `work\docs`, so a
 test never writes into the player's `Documents\SimCity 4` (an early run created `sc4.cfg`
 there; nothing else was touched).
 
 Host diagnostics: `[host] framework phase N` as startup moves, `[host] C++ throw <type>` for
 every guest throw (with a `cParseError`'s message), `--trace-init` for the component loop,
-`--native-trace` for every Windows call.
+`--native-trace` for every Windows call, `--spy VA` for one function's indirect calls,
+`--snap DIR` for frames, `NATIVE32_TRACE_EH=1` for guest exceptions.

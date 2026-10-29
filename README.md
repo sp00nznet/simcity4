@@ -12,28 +12,42 @@ the lifter runs on your machine and writes the C into a gitignored folder.
 
 ## Status
 
-**P0, bring-up. Nothing plays yet.** The Steam wrapper comes off, the function
-catalog is built with pcrecomp's own tools (no IDA), the whole game lifts with
-no errors, and the recompiled program runs its startup as far as the game's own
-init. See [docs/RECON.md](docs/RECON.md) for what the binary is.
+**P1, boots to the main menu.** The whole game lifts with no errors and the
+recompiled program runs headless through its startup into the main menu on the
+software renderer, frame for frame like the original code under the same host.
+Nothing is played yet: there is no input scripting, and a region has not been
+loaded. See [docs/RECON.md](docs/RECON.md) for the binary and the bring-up.
 
 | Area | State |
 |---|---|
 | Steam wrapper | Removed statically (needs pcrecomp#149) |
 | Function catalog | 50,604 functions, 97% of `.text`, from disasm32 seeded with 18,437 vtable methods |
 | Lift | 50,766 functions, 0 lift errors, 10.2M lines of C |
-| Host (`build/sc4.exe`, 32-bit, `native32`) | Boots the CRT and the GZCOM framework, makes the software renderer's window, then stops in the app's init (docs/RECON.md, Bring-up) |
+| Startup | CRT, GZCOM framework, app init, main loop (all lifted) |
+| Rendering | Software driver: splash and main menu, matching the original's frames; the generated span code runs natively (needs pcrecomp's native32 generated-code support) |
+| Sound | Off on a machine with no audio device (`-audio:off` is added); not tested with one |
+| DirectX 7 / OpenGL drivers | Not tried yet (headless falls back to software) |
+| Input, regions, cities | Not tried yet |
 
 ## Screenshots
 
-None yet: there is no recompiled output to show.
+Captured headless with `--snap` (the recompiled game's own frames, nothing on screen):
+
+| | |
+|---|---|
+| ![Splash](docs/screenshots/splash.png) | ![Main menu](docs/screenshots/main-menu.png) |
+| The splash screen, loading in | The main menu over its clouds |
+
+The cloud streaks are the game's: the shipping code under the same host draws
+the same ([main-menu-original.png](docs/screenshots/main-menu-original.png)).
 
 ## Getting Started
 
 You need Windows 10/11, your own **SimCity 4 Deluxe** installed (Steam), Visual
 Studio 2022 (or its Build Tools) with *Desktop development with C++*, and about
 3 GB free. pcrecomp is expected beside this folder (`..\pcrecomp`); until
-pcrecomp#149 merges, check out its `fix/steamstub-unencrypted-code` branch.
+its open PRs merge (#149 for the Steam wrapper, and the generated-code support in
+native32), build against a checkout that has both.
 
 ### Quick start
 
@@ -68,7 +82,12 @@ build\sc4.exe --run                run (muted; --sound to hear it)
 build\sc4.exe --run --headless     no window on screen, message boxes printed
 build\sc4.exe --run --args "-intro:off -w -d:Software"   the game's own switches
 build\sc4.exe --run --original     the shipping machine code under the same host (to compare)
+build\sc4.exe --run --headless --snap shots --snap-every 500   save every 500th frame as a BMP
+build\sc4.exe --run --spy 877D7A   log the indirect calls one lifted function makes
 ```
+
+Headless runs keep the game's Documents folder in `work\docs`, never your
+`Documents\SimCity 4`. `NATIVE32_TRACE_EH=1` traces guest C++ exceptions.
 
 ## Building from source
 
