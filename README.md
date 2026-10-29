@@ -24,7 +24,7 @@ loaded. See [docs/RECON.md](docs/RECON.md) for the binary and the bring-up.
 | Function catalog | 50,604 functions, 97% of `.text`, from disasm32 seeded with 18,437 vtable methods |
 | Lift | 50,766 functions, 0 lift errors, 10.2M lines of C |
 | Startup | CRT, GZCOM framework, app init, main loop (all lifted) |
-| Rendering | Software driver: splash and main menu, matching the original's frames; the generated span code runs natively (needs pcrecomp's native32 generated-code support) |
+| Rendering | Software driver: splash and main menu, matching the original's frames; the generated span code runs natively (needs pcrecomp#153) |
 | Sound | Off on a machine with no audio device (`-audio:off` is added); not tested with one |
 | DirectX 7 / OpenGL drivers | Not tried yet (headless falls back to software) |
 | Input, regions, cities | Not tried yet |
@@ -46,7 +46,7 @@ the same ([main-menu-original.png](docs/screenshots/main-menu-original.png)).
 You need Windows 10/11, your own **SimCity 4 Deluxe** installed (Steam), Visual
 Studio 2022 (or its Build Tools) with *Desktop development with C++*, and about
 3 GB free. pcrecomp is expected beside this folder (`..\pcrecomp`); until
-its open PRs merge (#149 for the Steam wrapper, and the generated-code support in
+its open PRs merge (#149 for the Steam wrapper, #153 for the generated-code support in
 native32), build against a checkout that has both.
 
 ### Quick start

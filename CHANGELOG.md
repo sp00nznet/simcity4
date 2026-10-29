@@ -32,7 +32,7 @@ versions follow [SemVer](https://semver.org/).
 - No audio device: `-audio:off` is added, or the sound manager's update writes through
   null (the original too).
 - The software renderer's generated span code runs natively with the guest's registers
-  (needs pcrecomp native32 generated-code support).
+  (needs pcrecomp#153).
 - Headless `GetDC(NULL)` returns a screen-compatible memory DC instead of 0: SC4 read
   a 0-bit display from it and crashed on a null view (0x0098E9A6).
 
