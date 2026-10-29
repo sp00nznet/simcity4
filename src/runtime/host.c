@@ -24,6 +24,7 @@
 #include "native32.h"
 #include "recomp_trace.h"
 #include "oracle.h"
+#include "steamreg.h"
 
 extern const uint32_t sc4_entry_va;  /* recomp_dispatch.c */
 
@@ -84,6 +85,60 @@ static void shim_GetModuleFileNameA(void) {
         g_eax = GetModuleFileNameA((HMODULE)(uintptr_t)h, out, size);
     }
     g_esp += 4 + 3 * 4;
+}
+
+/* SC4 also fetches GetModuleFileNameW through GetProcAddress (0x00912467) and
+ * builds its data paths from it: unanswered, it looked for Graphics Rules.sgr
+ * beside the host and threw nSCRes::cParseError when it was not there. So
+ * GetProcAddress hands out this stand-in for that one name. */
+static DWORD WINAPI guest_GetModuleFileNameW(HMODULE h, LPWSTR out, DWORD size) {
+    if (h && (uint32_t)(uintptr_t)h != SC4_IMAGE_BASE) return GetModuleFileNameW(h, out, size);
+    if (!size) return 0;
+    int n = MultiByteToWideChar(CP_ACP, 0, g_guest_exe, -1, out, (int)size);
+    if (!n) { out[size - 1] = 0; SetLastError(ERROR_INSUFFICIENT_BUFFER); return size; }
+    return (DWORD)n - 1;
+}
+
+/* Documents: the game keeps sc4.cfg, its Regions and Plugins in Documents\
+ * SimCity 4. Headless runs (and --private-docs) get work\docs instead, so a
+ * test never writes into the player's cities. It asks two ways: the
+ * SHGetFolderPathW it fetches through GetProcAddress, and
+ * SHGetSpecialFolderLocation + SHGetPathFromIDListA (imported). */
+#define CSIDL_PERSONAL_ 0x0005
+static char g_private_docs[MAX_PATH];   /* empty: the real Documents */
+static char g_real_docs[MAX_PATH];
+
+static HRESULT WINAPI guest_SHGetFolderPathW(HWND w, int csidl, HANDLE tok, DWORD flags, LPWSTR out) {
+    typedef HRESULT (WINAPI *fn_t)(HWND, int, HANDLE, DWORD, LPWSTR);
+    static fn_t real;
+    if (!real) real = (fn_t)GetProcAddress(LoadLibraryA("shell32.dll"), "SHGetFolderPathW");
+    if (g_private_docs[0] && (csidl & 0xFF) == CSIDL_PERSONAL_) {
+        MultiByteToWideChar(CP_ACP, 0, g_private_docs, -1, out, MAX_PATH);
+        return S_OK;
+    }
+    return real(w, csidl, tok, flags, out);
+}
+
+static void shim_SHGetPathFromIDListA(void) {
+    typedef BOOL (WINAPI *fn_t)(const void*, LPSTR);
+    static fn_t real;
+    if (!real) real = (fn_t)GetProcAddress(LoadLibraryA("shell32.dll"), "SHGetPathFromIDListA");
+    char* out = (char*)(uintptr_t)ARG(1);
+    g_eax = real((const void*)(uintptr_t)ARG(0), out);
+    if (g_eax && g_private_docs[0] && !_stricmp(out, g_real_docs)) strcpy(out, g_private_docs);
+    g_esp += 4 + 2 * 4;
+}
+
+static void shim_GetProcAddress(void) {
+    HMODULE m = (HMODULE)(uintptr_t)ARG(0);
+    const char* name = (const char*)(uintptr_t)ARG(1);
+    if (HIWORD((uintptr_t)name) && !strcmp(name, "GetModuleFileNameW"))
+        g_eax = (uint32_t)(uintptr_t)guest_GetModuleFileNameW;
+    else if (HIWORD((uintptr_t)name) && !strcmp(name, "SHGetFolderPathW"))
+        g_eax = (uint32_t)(uintptr_t)guest_SHGetFolderPathW;
+    else
+        g_eax = (uint32_t)(uintptr_t)GetProcAddress(m, name);
+    g_esp += 4 + 2 * 4;
 }
 
 static void shim_GetCommandLineA(void) {
@@ -211,6 +266,13 @@ static native32_shim_t g_shims[] = {
     { "GetModuleHandleA", shim_GetModuleHandleA },
     { "GetModuleFileNameA", shim_GetModuleFileNameA },
     { "GetCommandLineA", shim_GetCommandLineA },
+    { "GetProcAddress", shim_GetProcAddress },
+    { "SHGetPathFromIDListA", shim_SHGetPathFromIDListA },
+    { "RegOpenKeyExA", shim_RegOpenKeyExA },        /* steamreg.c */
+    { "RegCreateKeyExA", shim_RegCreateKeyExA },
+    { "RegQueryValueExA", shim_RegQueryValueExA },
+    { "RegSetValueExA", shim_RegSetValueExA },
+    { "RegCloseKey", shim_RegCloseKey },
 };
 
 /* ---- muted by default (kotor's: the process's own audio session) ------------ */
@@ -242,8 +304,30 @@ static int mute_process(void) {
 }
 
 /* ---- reports ---------------------------------------------------------------- */
+/* --trace-init: every indirect call the framework's component init loop
+ * (0x00879FBC) makes, with the component, its vtable and the answer. Each
+ * lifted indirect call asks recomp_lookup_manual first, so the spy sits in
+ * between without touching the lift; the globals are current inside it
+ * (RECOMP_REGS_OUT ran). */
+static int g_trace_init;
+static uint32_t g_spy_va;
+static recomp_func_t g_spy_fn;
+
+static void spy_init_call(void) {
+    uint32_t va = g_spy_va, self = g_ecx;
+    recomp_func_t fn = g_spy_fn;
+    uint32_t a0 = MEM32(g_esp + 4), a1 = MEM32(g_esp + 8);
+    fn();
+    printf("[init] 0x%08X this=0x%08X vtable=0x%08X (0x%X, 0x%X) -> 0x%X\n",
+           va, self, self ? MEM32(self) : 0, a0, a1, g_eax);
+    fflush(stdout);
+}
+
 recomp_func_t recomp_lookup_manual(uint32_t va) {
-    (void)va;
+    if (g_trace_init && g_cur_func == 0x00879FBCu) {
+        recomp_func_t fn = recomp_lookup(va);
+        if (fn) { g_spy_va = va; g_spy_fn = fn; return spy_init_call; }
+    }
     return NULL;
 }
 
@@ -320,6 +404,49 @@ static DWORD WINAPI phase_watch(LPVOID unused) {
     }
 }
 
+/* Every MSVC C++ throw (0xE06D7363), first chance: the type, from the x86
+ * ThrowInfo (+0x0C catchable types -> [0] -> type descriptor, name at +8),
+ * the object's first words, and where it came from. Passed on untouched. */
+/* Committed and readable for n bytes, asked without touching it: IsBadReadPtr
+ * faults to find out, and crash() takes that fault for the game's. */
+static int readable(uint32_t a, uint32_t n) {
+    MEMORY_BASIC_INFORMATION mi;
+    if (a < 0x10000 || !VirtualQuery((void*)(uintptr_t)a, &mi, sizeof mi) || mi.State != MEM_COMMIT) return 0;
+    if (mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return 0;
+    return a + n <= (uint32_t)(uintptr_t)mi.BaseAddress + (uint32_t)mi.RegionSize;
+}
+
+static LONG CALLBACK cxx_throw(EXCEPTION_POINTERS* ep) {
+    EXCEPTION_RECORD* r = ep->ExceptionRecord;
+    if (r->ExceptionCode != 0xE06D7363u || r->NumberParameters < 3) return EXCEPTION_CONTINUE_SEARCH;
+    uint32_t obj = (uint32_t)r->ExceptionInformation[1], ti = (uint32_t)r->ExceptionInformation[2];
+    const char* name = "?";
+    if (ti && MEM32(ti + 0x0C) && MEM32(MEM32(ti + 0x0C) + 4))
+        name = (const char*)(uintptr_t)(MEM32(MEM32(MEM32(ti + 0x0C) + 4) + 4) + 8);
+    printf("[host] C++ throw %s, object 0x%08X [%08X %08X %08X], in sub_%08X, thread %lu\n",
+           name, obj, obj ? MEM32(obj) : 0, obj ? MEM32(obj + 4) : 0, obj ? MEM32(obj + 8) : 0,
+           g_cur_func, GetCurrentThreadId());
+    /* Any word of the object that points at text (an error message, a file
+     * name): STLport strings keep a plain char* to it. */
+    if (obj && readable(obj, 0x20))
+        printf("        words %08X %08X %08X %08X %08X %08X %08X %08X\n", MEM32(obj), MEM32(obj + 4),
+               MEM32(obj + 8), MEM32(obj + 12), MEM32(obj + 16), MEM32(obj + 20), MEM32(obj + 24), MEM32(obj + 28));
+    /* nSCRes::cParseError's builder (0x0067A250) formats into this buffer. */
+    /* nSCRes::cParseError (0x0067A250): {vtable, code, ?, message start, finish, ...}. */
+    if (strstr(name, "cParseError") && MEM32(obj + 16) > MEM32(obj + 12) && MEM32(obj + 16) - MEM32(obj + 12) < 1024)
+        printf("        message: \"%.*s\"\n", (int)(MEM32(obj + 16) - MEM32(obj + 12)), (const char*)(uintptr_t)MEM32(obj + 12));
+    for (int i = 0; obj && i < 16; i++) {
+        uint32_t w = MEM32(obj + 4 * i);
+        if (!readable(w, 128)) continue;
+        const char* s = (const char*)(uintptr_t)w;
+        int n = 0;
+        while (n < 120 && s[n] >= 32 && s[n] < 127) n++;
+        if (n >= 3 && !s[n]) printf("        +0x%02X -> \"%s\"\n", 4 * i, s);
+    }
+    fflush(stdout);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 static DWORD WINAPI watchdog(LPVOID unused) {
     (void)unused;
     Sleep(g_watchdog_s * 1000);
@@ -338,7 +465,7 @@ int main(int argc, char** argv) {
     const char* game = "game";
     const char* game_args = "-intro:off -w";   /* the game's own switches; --args replaces them */
     char exe_full[MAX_PATH], game_full[MAX_PATH], apps[MAX_PATH];
-    int run = 0, sound = 0;
+    int run = 0, sound = 0, private_docs = 0;
     for (int i = 1; i < argc; i++) {
         int n = recomp_trace_arg(argc, argv, i);
         if (n) { i += n - 1; continue; }
@@ -346,6 +473,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--sound")) sound = 1;
         else if (!strcmp(argv[i], "--headless")) g_headless = 1;
         else if (!strcmp(argv[i], "--original")) g_original = 1;
+        else if (!strcmp(argv[i], "--private-docs")) private_docs = 1;
+        else if (!strcmp(argv[i], "--trace-init")) g_trace_init = 1;
         else if (!strcmp(argv[i], "--modeswitch")) g_modeswitch = 1;
         else if (!strcmp(argv[i], "--gamma")) g_gamma = 1;
         else if (!strcmp(argv[i], "--exe") && i + 1 < argc) exe = argv[++i];
@@ -355,7 +484,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--native-trace")) native32_trace_native = 1;
         else if (!strcmp(argv[i], "--callbacks")) native32_trace_callbacks = 1;
         else {
-            printf("usage: sc4 [--run] [--headless] [--sound] [--modeswitch] [--gamma] [--original] [--exe work\\sc4.exe] [--game game]\n"
+            printf("usage: sc4 [--run] [--headless] [--sound] [--modeswitch] [--gamma] [--original] [--private-docs] [--trace-init] [--exe work\\sc4.exe] [--game game]\n"
                    "           [--args \"-intro:off -w\"] [--watchdog S] [--native-trace] [--callbacks]\n");
             recomp_trace_help();
             return argv[i][1] == 'h' || argv[i][2] == 'h' ? 0 : 1;
@@ -367,7 +496,24 @@ int main(int argc, char** argv) {
     _snprintf(g_guest_exe, sizeof g_guest_exe - 1, "%s\\SimCity 4.exe", apps);
     _snprintf(g_guest_cmdline, sizeof g_guest_cmdline - 1, "\"%s\" %s", g_guest_exe, game_args);
     SetDllDirectoryA(apps);
+    if (g_headless || private_docs) {           /* before the run chdirs into game\Apps */
+        typedef HRESULT (WINAPI *gfp_t)(HWND, int, HANDLE, DWORD, LPSTR);
+        gfp_t gfp = (gfp_t)GetProcAddress(LoadLibraryA("shell32.dll"), "SHGetFolderPathA");
+        if (gfp) gfp(NULL, CSIDL_PERSONAL_, NULL, 0, g_real_docs);
+        CreateDirectoryA("work", NULL);
+        GetFullPathNameA("work\\docs", MAX_PATH, g_private_docs, NULL);
+        CreateDirectoryA(g_private_docs, NULL);
+        printf("  documents: %s (not %s)\n", g_private_docs, g_real_docs);
+    }
+    {
+        char vdf[MAX_PATH], dir[MAX_PATH];
+        _snprintf(vdf, sizeof vdf - 1, "%s\\24780_install.vdf", game_full);
+        _snprintf(dir, sizeof dir - 1, "%s", game_full);   /* %INSTALLDIR% */
+        printf("  registry: %d keys from Steam's install script%s\n", steamreg_load(vdf, dir),
+               GetFileAttributesA(vdf) == INVALID_FILE_ATTRIBUTES ? " (none found: real registry only)" : "");
+    }
 
+    AddVectoredExceptionHandler(1, cxx_throw);
     if (g_original) {
         /* The same shims, folder, mute and watchdog around the original code. */
         if (!SetCurrentDirectoryA(apps)) { fprintf(stderr, "cannot enter %s\n", apps); return 1; }

@@ -95,9 +95,29 @@ the rest through `_initterm`'s constructor table and the GZCOM vtables.
 3. DirectDraw's exclusive fullscreen fails headless (`SetDisplayMode` E_NOTIMPL); the game
    says "Could not initialize Direct Draw" and falls back to its software driver on a GDI DIB
    section. It creates `GDriverWindow--Software` at 1024x768.
-4. **Now:** `cGZFramework` startup (0x0087AF13) passes phases 1 and 3, then the app init at
-   phase 4 (vtable 0x00AC3090 slot +0xA8 = 0x00879FBC) fails: it walks the registered
-   components by priority and one refuses (exit at 0x0087A03A). `WinMain` returns -1.
-   Next: name that component (hook 0x0087A03A, print `edi` and its vtable).
+4. **Fixed:** `cGZFramework` startup (0x0087AF13) failed its phase 4: the component loop
+   (0x00879FBC) asks each registered component, by priority, and the app itself (vtable
+   0x00A86ABC, init 0x0044C320) refused. `--trace-init` showed which. Its init reads
+   `HKLM\SOFTWARE\Maxis\SimCity 4\Install Dir`, and this copy was never launched through
+   Steam, which writes those keys on first launch from `24780_install.vdf`. The original
+   fails the same way. The host now serves the script's keys from memory (`steamreg.c`):
+   nothing is written to the real registry, and a test VM needs no setup.
+5. **Fixed:** the game took its data folder from `GetModuleFileNameW`, fetched with
+   `GetProcAddress` (0x00912467) and so not shimmed: it looked for `Graphics Rules.sgr`
+   beside the host. `GetProcAddress` now hands out a stand-in that names the guest exe.
+6. **In progress:** the game throws `nSCRes::cParseError` "Couldn't open file
+   '...\Documents\SimCity 4\Graphics Options.sgr'", an optional file it catches itself.
+   SC4 links its C runtime statically, so its `_CxxThrowException` (0x009EF84F) is game code
+   that calls `RaiseException`, and Windows never saw the guest's EH frames. `run_lift.py`
+   now forwards that function to native32's `eh32` dispatcher (`FORWARD`) and gives the 38
+   functions with catch blocks their landing pads (`eh32.resume_points`, kf's way).
+   `--original` cannot catch it either: Windows refuses SEH handlers outside a loaded image
+   when the host is `/NXCOMPAT`, so the oracle stops at the first guest throw.
 
-The host prints each framework phase as it changes (`[host] framework phase N`).
+Headless runs (and `--private-docs`) keep the game's Documents folder in `work\docs`, so a
+test never writes into the player's `Documents\SimCity 4` (an early run created `sc4.cfg`
+there; nothing else was touched).
+
+Host diagnostics: `[host] framework phase N` as startup moves, `[host] C++ throw <type>` for
+every guest throw (with a `cParseError`'s message), `--trace-init` for the component loop,
+`--native-trace` for every Windows call.

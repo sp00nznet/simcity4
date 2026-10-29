@@ -31,7 +31,9 @@ _TOOLS = os.path.join(os.environ.get('PCRECOMP', os.path.join(_HERE, '..', 'pcre
 sys.path.insert(0, os.path.join(_TOOLS, 'lift'))
 sys.path.insert(0, os.path.join(_TOOLS, 'pe'))
 
+import pefile                                              # noqa: E402
 from capstone import Cs, CS_ARCH_X86, CS_MODE_32          # noqa: E402
+from eh32 import resume_points                             # noqa: E402
 from generate import (EXTENT_REACH, closure, find_splits, true_extent,  # noqa: E402
                       linear_disassemble_function, lift_function_linear, write_chunk)
 from lift32 import Lifter                                  # noqa: E402
@@ -44,7 +46,27 @@ OUT = os.path.join(_HERE, 'src', 'recomp', 'gen')
 STATS = os.path.join(_HERE, 'work', 'lift_stats.json')
 
 # Entries the catalog does not find, so a clean checkout lifts them too.
-RUN_SEEDS = []
+# Callbacks named only by `mov reg, offset fn` / `push offset fn` at a padded
+# function start: the software renderer's span routines (0x008F6200..,
+# chosen in 0x008F65F0 and called from 0x008F5940) and five others. disasm32's
+# immediate harvest should find them and does not (ROADMAP: toolkit issue);
+# found by scanning for such immediates that land on an int3-padded 16-byte
+# boundary the catalog lacks.
+RUN_SEEDS = [
+    0x00514660, 0x00745DE0, 0x007D65D0, 0x0083DD00, 0x008B0040,
+    0x008F6200, 0x008F6240, 0x008F6260, 0x008F62A0, 0x008F6370, 0x008F63C0,
+    0x008F6410, 0x008F6460, 0x008F64B0, 0x008F6500, 0x008F6550, 0x008F65A0,
+]
+
+# Functions whose lifted body is a call to the runtime instead. SC4 links its C
+# runtime statically, so its _CxxThrowException is this function, not an
+# import native32 can shim by name: lifted, it RaiseExceptions for real and
+# Windows, which never saw the guest's EH frames, ends the process. Forwarded,
+# eh32 dispatches the throw over them (the game catches its own "Couldn't open
+# file" for the optional Graphics Options.sgr).
+FORWARD = {
+    0x009EF84F: 'native32_shim_CxxThrowException',
+}
 
 
 def load_seeds(path):
@@ -102,6 +124,11 @@ def main():
     md.detail = True
     text = [s for s in info.sections if s.name == '.text'][0]
     code = open(args.exe, 'rb').read()[text.raw_offset:text.raw_offset + text.raw_size]
+    # The image as mapped, for the EH tables in .rdata: a catch has to resume
+    # inside the lifted body that owns it (pcrecomp eh32, kf's run_lift.py).
+    mapped = pefile.PE(args.exe).get_memory_mapped_image()
+    base = info.image_base
+    read = lambda va, n: mapped[va - base:va - base + n] if 0 <= va - base < len(mapped) else None  # noqa: E731
 
     # precise carry: adc/sbb take their carry from the flag state that set it.
     # The default reads a `_cf` that add/sub/cmp never write, which breaks every
@@ -117,6 +144,17 @@ def main():
     t_split = time.time()
     splits = find_splits(md, code, cs, ce, starts)
     starts -= splits          # still dispatchable; just not a wall inside its parent
+    # Where a function resumes after its own catch blocks. Nothing branches
+    # there (the funclet returns the address), so the catalog may start a
+    # function at it: it is not a wall, and it is walked as part of its parent.
+    eh_at = {}
+    for a in byaddr:
+        r = resume_points(md, read, list(md.disasm(read(a, 64) or b'', a))[:12])
+        if r:
+            eh_at[a] = r
+    starts -= set().union(*eh_at.values()) if eh_at else set()
+    print('[*] functions with C++ catch blocks: %d (%d resume points)'
+          % (len(eh_at), sum(len(v) for v in eh_at.values())))
     print('[*] split entries (the middle of the function before them): %d, %.0fs'
           % (len(splits), time.time() - t_split))
     t0 = time.time()
@@ -136,8 +174,11 @@ def main():
                               if end > addr else ([], None))
             if leaders is not None:
                 leaders.add(addr)
-            body = (lift_function_linear(lifter, name, insns, leaders, addr) if insns
-                    else 'void %s(void) { }\n' % name)
+            if addr in FORWARD:
+                body = 'void %s(void) { %s(); }\n' % (name, FORWARD[addr])
+            else:
+                body = (lift_function_linear(lifter, name, insns, leaders, addr, eh_resume=eh_at.get(addr))
+                        if insns else 'void %s(void) { }\n' % name)
         except Exception as e:                      # noqa: BLE001 -- counted, not hidden
             body = '/* ERROR %s: %s */\nvoid %s(void) { }\n' % (name, e, name)
             errors += 1
@@ -159,6 +200,11 @@ def main():
             reached, behind, called = set(), set(), set()
             end, clean = true_extent(md, code, cs, addr, min(addr + EXTENT_REACH, ce), starts,
                                      reached=reached, behind=behind, called=called)
+            for r in eh_at.get(addr, ()):
+                if cs <= r < ce:
+                    e2, _ = true_extent(md, code, cs, r, min(r + EXTENT_REACH, ce), starts,
+                                        reached=reached, behind=behind, called=called)
+                    end = max(end, e2)
             outside |= {t for t in behind if t not in reached} | called
             dirty += not clean
             lift_one(addr, name, end, reached)
@@ -181,6 +227,7 @@ def main():
         f.write('/* SimCity 4.exe - AUTO-GENERATED by run_lift.py */\n#pragma once\n'
                 '#include <stdint.h>\n\n'
                 'void recomp_not_lifted(uint32_t va);\n'
+                + ''.join('void %s(void);\n' % f for f in sorted(set(FORWARD.values()))) +
                 '#define RECOMP_NOT_LIFTED(va) recomp_not_lifted(va)\n\n')
         for a, n in entries:
             f.write('void %s(void);\n' % n)
