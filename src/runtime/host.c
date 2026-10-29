@@ -100,8 +100,9 @@ static DWORD WINAPI guest_GetModuleFileNameW(HMODULE h, LPWSTR out, DWORD size) 
 }
 
 /* Documents: the game keeps sc4.cfg, its Regions and Plugins in Documents\
- * SimCity 4. Headless runs (and --private-docs) get work\docs instead, so a
- * test never writes into the player's cities. It asks two ways: the
+ * SimCity 4. Every run gets work\docs instead (--user-docs for the real one),
+ * so a test never writes into the player's cities: the first visible run, before
+ * this, copied the stock regions into the real Documents. It asks two ways: the
  * SHGetFolderPathW it fetches through GetProcAddress, and
  * SHGetSpecialFolderLocation + SHGetPathFromIDListA (imported). */
 #define CSIDL_PERSONAL_ 0x0005
@@ -156,10 +157,56 @@ static void shim_GetCommandLineA(void) {
     if (g_original) oracle_take(); else mach_enter(); \
     g_esp = esp_; SetLastError(err_); } while (0)
 
+/* --monitor N: the game's top-level windows go on display N (\.\DISPLAYN)
+ * instead of the primary one. Positions the game gives relative to the
+ * primary screen are shifted by that monitor's origin; ones already on it,
+ * CW_USEDEFAULT and the minimized -32000 are left alone. ponytail: the window
+ * keeps the game's size; if it is bigger than the monitor, it hangs over. */
+static int g_mon_on;
+static RECT g_mon;     /* that monitor's work area */
+
+static BOOL CALLBACK find_monitor(HMONITOR m, HDC dc, LPRECT r, LPARAM want) {
+    (void)dc; (void)r;
+    MONITORINFOEXA mi;
+    mi.cbSize = sizeof mi;
+    char name[32];
+    _snprintf(name, sizeof name - 1, "\\\\.\\DISPLAY%d", (int)want);
+    name[sizeof name - 1] = 0;
+    if (GetMonitorInfoA(m, (MONITORINFO*)&mi) && !_stricmp(mi.szDevice, name)) {
+        g_mon = mi.rcWork;
+        g_mon_on = 1;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void place(uint32_t style, uint32_t* x, uint32_t* y) {
+    if (!g_mon_on || (style & WS_CHILD) || *x == (uint32_t)CW_USEDEFAULT) return;
+    int ix = (int)*x, iy = (int)*y;
+    if (ix <= -10000 || (ix >= g_mon.left && ix < g_mon.right && iy >= g_mon.top && iy < g_mon.bottom)) return;
+    *x = (uint32_t)(ix + g_mon.left);
+    *y = (uint32_t)(iy + g_mon.top);
+}
+
+static int is_top_level(HWND w) {
+    return w && !(GetWindowLongA(w, GWL_STYLE) & WS_CHILD);
+}
+
+static void shim_MoveWindow(void) {
+    uint32_t a[6];
+    for (int i = 0; i < 6; i++) a[i] = ARG(i);
+    if (is_top_level((HWND)(uintptr_t)a[0])) place(0, &a[1], &a[2]);
+    BOOL r;
+    UNLOCKED(r = MoveWindow((HWND)(uintptr_t)a[0], (int)a[1], (int)a[2], (int)a[3], (int)a[4], (BOOL)a[5]));
+    g_eax = r;
+    g_esp += 4 + 6 * 4;
+}
+
 static void shim_CreateWindowExA(void) {
     uint32_t a[12];
     for (int i = 0; i < 12; i++) a[i] = ARG(i);
     if (g_headless) a[3] &= ~WS_VISIBLE;
+    place(a[3], &a[4], &a[5]);
     HWND h;
     UNLOCKED(h = CreateWindowExA(a[0], (LPCSTR)(uintptr_t)a[1], (LPCSTR)(uintptr_t)a[2], a[3],
                                  a[4], a[5], a[6], a[7], (HWND)(uintptr_t)a[8],
@@ -196,6 +243,7 @@ static void shim_SetWindowPos(void) {
     uint32_t a[7];
     for (int i = 0; i < 7; i++) a[i] = ARG(i);
     if (g_headless) a[6] = (a[6] | SWP_NOACTIVATE | SWP_NOZORDER) & ~SWP_SHOWWINDOW;
+    if (!(a[6] & SWP_NOMOVE) && is_top_level((HWND)(uintptr_t)a[0])) place(0, &a[2], &a[3]);
     BOOL r;
     UNLOCKED(r = SetWindowPos((HWND)(uintptr_t)a[0], (HWND)(uintptr_t)a[1], (int)a[2], (int)a[3],
                               (int)a[4], (int)a[5], a[6]));
@@ -223,12 +271,48 @@ static void shim_MessageBoxA(void) {
 /* ---- milestones ------------------------------------------------------------- */
 static volatile LONG g_frames;
 
+static const char* g_snap_dir;   /* --snap: defined with the software driver's below */
+static LONG g_snap_every;
+
+/* --snap under OpenGL: the back buffer just before the swap, read with
+ * glReadPixels (kotor's recorder does the same), written bottom-up as BMP. */
+static void snap_gl(HWND w, LONG n) {
+    typedef void (WINAPI *read_pixels_t)(int, int, int, int, unsigned, unsigned, void*);
+    typedef void (WINAPI *read_buffer_t)(unsigned);
+    HMODULE gl = GetModuleHandleA("opengl32.dll");
+    read_pixels_t rp = gl ? (read_pixels_t)GetProcAddress(gl, "glReadPixels") : NULL;
+    read_buffer_t rb = gl ? (read_buffer_t)GetProcAddress(gl, "glReadBuffer") : NULL;
+    RECT rc;
+    if (!rp || !GetClientRect(w, &rc) || rc.right <= 0 || rc.bottom <= 0) return;
+    int cw = rc.right, ch = rc.bottom;
+    DWORD size = (DWORD)cw * ch * 4;
+    uint8_t* px = (uint8_t*)malloc(size);
+    if (!px) return;
+    if (rb) rb(0x0405 /* GL_BACK */);
+    rp(0, 0, cw, ch, 0x80E1 /* GL_BGRA */, 0x1401 /* GL_UNSIGNED_BYTE */, px);
+    char path[MAX_PATH];
+    _snprintf(path, sizeof path - 1, "%s\\frame_%05ld.bmp", g_snap_dir, n);
+    path[sizeof path - 1] = 0;
+    FILE* f = fopen(path, "wb");
+    if (f) {
+        BITMAPINFOHEADER bi = { sizeof bi, cw, ch, 1, 32, BI_RGB };
+        BITMAPFILEHEADER fh = { 0x4D42, sizeof fh + sizeof bi + size, 0, 0, sizeof fh + sizeof bi };
+        fwrite(&fh, sizeof fh, 1, f);
+        fwrite(&bi, sizeof bi, 1, f);
+        fwrite(px, 1, size, f);
+        fclose(f);
+        printf("[host] frame %ld -> %s (%dx%d, OpenGL)\n", n, path, cw, ch);
+    }
+    free(px);
+}
+
 static void shim_SwapBuffers(void) {
     LONG n = InterlockedIncrement(&g_frames);
     if (n == 1 || n == 60 || n % 1000 == 0) printf("[host] frame %ld presented (OpenGL)\n", n);
     HDC dc = (HDC)(uintptr_t)ARG(0);
     HWND w = WindowFromDC(dc);
     if (g_headless && w && IsWindowVisible(w)) ShowWindow(w, SW_HIDE);
+    if (g_snap_dir && w && (n == 1 || n % g_snap_every == 0)) snap_gl(w, n);
     g_eax = SwapBuffers(dc);
     g_esp += 4 + 1 * 4;
 }
@@ -308,6 +392,7 @@ static native32_shim_t g_shims[] = {
     { "GetDC", shim_GetDC },
     { "MessageBoxA", shim_MessageBoxA },
     { "SetWindowPos", shim_SetWindowPos },
+    { "MoveWindow", shim_MoveWindow },
     { "SwapBuffers", shim_SwapBuffers },
     { "BitBlt", shim_BitBlt },
     { "ExitProcess", shim_ExitProcess },
@@ -517,7 +602,7 @@ int main(int argc, char** argv) {
     const char* game = "game";
     const char* game_args = "-intro:off -w";   /* the game's own switches; --args replaces them */
     char exe_full[MAX_PATH], game_full[MAX_PATH], apps[MAX_PATH];
-    int run = 0, sound = 0, private_docs = 0;
+    int run = 0, sound = 0, user_docs = 0;
     for (int i = 1; i < argc; i++) {
         int n = recomp_trace_arg(argc, argv, i);
         if (n) { i += n - 1; continue; }
@@ -525,7 +610,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--sound")) sound = 1;
         else if (!strcmp(argv[i], "--headless")) g_headless = 1;
         else if (!strcmp(argv[i], "--original")) g_original = 1;
-        else if (!strcmp(argv[i], "--private-docs")) private_docs = 1;
+        else if (!strcmp(argv[i], "--user-docs")) user_docs = 1;
         else if (!strcmp(argv[i], "--trace-init")) g_spy_func = 0x00879FBCu;
         else if (!strcmp(argv[i], "--snap") && i + 1 < argc) {
             static char snap_full[MAX_PATH];     /* the run chdirs into game\Apps */
@@ -534,6 +619,13 @@ int main(int argc, char** argv) {
             g_snap_dir = snap_full;
         }
         else if (!strcmp(argv[i], "--snap-every") && i + 1 < argc) g_snap_every = strtol(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--monitor") && i + 1 < argc) {
+            int want = atoi(argv[++i]);
+            EnumDisplayMonitors(NULL, NULL, find_monitor, want);
+            if (!g_mon_on) { fprintf(stderr, "no display %d\n", want); return 1; }
+            printf("  windows on display %d: %ld,%ld %ldx%ld\n", want, g_mon.left, g_mon.top,
+                   g_mon.right - g_mon.left, g_mon.bottom - g_mon.top);
+        }
         else if (!strcmp(argv[i], "--spy") && i + 1 < argc) g_spy_func = strtoul(argv[++i], NULL, 16);
         else if (!strcmp(argv[i], "--modeswitch")) g_modeswitch = 1;
         else if (!strcmp(argv[i], "--gamma")) g_gamma = 1;
@@ -544,7 +636,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--native-trace")) native32_trace_native = 1;
         else if (!strcmp(argv[i], "--callbacks")) native32_trace_callbacks = 1;
         else {
-            printf("usage: sc4 [--run] [--headless] [--sound] [--modeswitch] [--gamma] [--original] [--private-docs] [--trace-init] [--spy VA] [--snap DIR] [--snap-every N] [--exe work\\sc4.exe] [--game game]\n"
+            printf("usage: sc4 [--run] [--headless] [--sound] [--modeswitch] [--gamma] [--original] [--user-docs] [--trace-init] [--spy VA] [--monitor N] [--snap DIR] [--snap-every N] [--exe work\\sc4.exe] [--game game]\n"
                    "           [--args \"-intro:off -w\"] [--watchdog S] [--native-trace] [--callbacks]\n");
             recomp_trace_help();
             return argv[i][1] == 'h' || argv[i][2] == 'h' ? 0 : 1;
@@ -556,7 +648,7 @@ int main(int argc, char** argv) {
     _snprintf(g_guest_exe, sizeof g_guest_exe - 1, "%s\\SimCity 4.exe", apps);
     _snprintf(g_guest_cmdline, sizeof g_guest_cmdline - 1, "\"%s\" %s", g_guest_exe, game_args);
     SetDllDirectoryA(apps);
-    if (g_headless || private_docs) {           /* before the run chdirs into game\Apps */
+    if (!user_docs) {                           /* before the run chdirs into game\Apps */
         typedef HRESULT (WINAPI *gfp_t)(HWND, int, HANDLE, DWORD, LPSTR);
         gfp_t gfp = (gfp_t)GetProcAddress(LoadLibraryA("shell32.dll"), "SHGetFolderPathA");
         if (gfp) gfp(NULL, CSIDL_PERSONAL_, NULL, 0, g_real_docs);

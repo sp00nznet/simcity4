@@ -12,11 +12,11 @@ the lifter runs on your machine and writes the C into a gitignored folder.
 
 ## Status
 
-**P1, boots to the main menu.** The whole game lifts with no errors and the
-recompiled program runs headless through its startup into the main menu on the
-software renderer, frame for frame like the original code under the same host.
-Nothing is played yet: there is no input scripting, and a region has not been
-loaded. See [docs/RECON.md](docs/RECON.md) for the binary and the bring-up.
+**P1, boots to the region view.** The whole game lifts with no errors. The
+recompiled program loads a region and draws it on the GPU (OpenGL, with sound
+on), and headless it reaches the main menu on the software renderer, frame for
+frame like the original code under the same host. A city has not been entered
+yet: there is no input scripting. See [docs/RECON.md](docs/RECON.md) for the binary and the bring-up.
 
 | Area | State |
 |---|---|
@@ -25,8 +25,9 @@ loaded. See [docs/RECON.md](docs/RECON.md) for the binary and the bring-up.
 | Lift | 50,766 functions, 0 lift errors, 10.2M lines of C |
 | Startup | CRT, GZCOM framework, app init, main loop (all lifted) |
 | Rendering | Software driver: splash and main menu, matching the original's frames; the generated span code runs natively (needs pcrecomp#153) |
-| Sound | Off on a machine with no audio device (`-audio:off` is added); not tested with one |
-| DirectX 7 / OpenGL drivers | Not tried yet (headless falls back to software) |
+| Sound | Runs with an audio device (muted by default, `--sound` to hear it); `-audio:off` is added on a machine with none |
+| OpenGL driver | Region view, ~50 frames a second on monitor 2 (`--monitor 2 --args "-intro:off -w -d:OpenGL"`) |
+| DirectX 7 driver | Not tried: it asks for exclusive fullscreen |
 | Input, regions, cities | Not tried yet |
 
 ## Screenshots
@@ -35,8 +36,10 @@ Captured headless with `--snap` (the recompiled game's own frames, nothing on sc
 
 | | |
 |---|---|
-| ![Splash](docs/screenshots/splash.png) | ![Main menu](docs/screenshots/main-menu.png) |
-| The splash screen, loading in | The main menu over its clouds |
+| ![Region view, OpenGL](docs/screenshots/region.png) | ![Splash](docs/screenshots/splash.png) |
+| The Timbuktu region, OpenGL | The splash screen, loading in (software, headless) |
+| ![Main menu](docs/screenshots/main-menu.png) | |
+| The main menu over its clouds (software, headless) | |
 
 The cloud streaks are the game's: the shipping code under the same host draws
 the same ([main-menu-original.png](docs/screenshots/main-menu-original.png)).
@@ -86,8 +89,9 @@ build\sc4.exe --run --headless --snap shots --snap-every 500   save every 500th 
 build\sc4.exe --run --spy 877D7A   log the indirect calls one lifted function makes
 ```
 
-Headless runs keep the game's Documents folder in `work\docs`, never your
-`Documents\SimCity 4`. `NATIVE32_TRACE_EH=1` traces guest C++ exceptions.
+Every run keeps the game's Documents folder in `work\docs`, never your
+`Documents\SimCity 4` (`--user-docs` to use the real one). `--monitor N` puts
+the window on display N. `NATIVE32_TRACE_EH=1` traces guest C++ exceptions.
 
 ## Building from source
 
