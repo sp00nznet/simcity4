@@ -20,6 +20,14 @@
 - [ ] `--headless --record out.mp4` (section 10)
 - [ ] netlab recipe and a QA pass on testbox
 
+## Fun
+- [x] Camera experiment: `--cam-tilt` / `--cam-yaw` (RECON 14)
+- [ ] Tilt and smooth zoom through the game's own camera object (it culls and places sprites)
+- [ ] `--record out.mp4` and a cinematic fly-over: tilt plus slow yaw, terrain only
+- [ ] Settings window (RA2's F10 menu): speed, camera, filters; widescreen and high DPI
+- [ ] Mods/plugins: SC4 already loads `Plugins\`; a folder overlay like RA2's
+- [ ] Day/night and weather post effects (SC2K's), as GL shaders
+
 ## Later
 - [ ] Score the catalog against IDA (`score_recovery.py`) and fix what it finds in disasm32
 - [ ] Names from the 237 `cSC4*`/`cIGZ*` class-name strings

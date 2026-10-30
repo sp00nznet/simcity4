@@ -18,6 +18,7 @@
 #include <audiopolicy.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -559,9 +560,64 @@ GL_SHIM(glColorMask, 4, "glColorMask %u %u %u %u", a0, a1, a2, a3)
 GL_SHIM(glDepthMask, 1, "glDepthMask %u", a0)
 GL_SHIM(glDepthFunc, 1, "glDepthFunc %04X", a0)
 GL_SHIM(glVertexPointer, 4, "glVertexPointer %u %04X s%u", a0, a1, a2)
-GL_SHIM(glMatrixMode, 1, "glMatrixMode %04X", a0)
 GL_SHIM(glLoadIdentity, 0, "glLoadIdentity")
-GL_SHIM(glLoadMatrixf, 1, "glLoadMatrixf rot %.3g %.3g %.3g, at %.4g %.4g %.4g", pf(a0, 0), pf(a0, 1), pf(a0, 2), pf(a0, 12), pf(a0, 13), pf(a0, 14))
+/* --cam-yaw DEG / --cam-tilt DEG: an experiment. SC4's city view is 3D under
+ * an orthographic camera (pitch 30, yaw 22.5); every scene matrix it loads into
+ * MODELVIEW is view * object, so turning the view here turns the world. Yaw
+ * spins about the vertical axis through the pivot, tilt about the screen's
+ * horizontal. Buildings are pre-rendered sprites and stay facing the game's
+ * camera; the game also culls for its own view.
+ * ponytail: fixed pivot (the middle of a large city tile); follow the camera's
+ * look-at point if this grows into a feature. */
+static uint32_t g_mmode = 0x1700;
+static float g_cam_yaw, g_cam_tilt;
+static void shim_glMatrixMode(void) {
+    static FARPROC real;
+    if (!real) real = gl_real("glMatrixMode");
+    g_mmode = ARG(0);
+    if (g_gltrace) gl_note("glMatrixMode %04X", g_mmode);
+    ((void (WINAPI*)(uint32_t))real)(g_mmode);
+    g_esp += 4 + 4;
+}
+static void mat_mul(float* r, const float* a, const float* b) {   /* r = a * b, column-major */
+    float t[16];
+    for (int c = 0; c < 4; c++)
+        for (int w = 0; w < 4; w++)
+            t[c * 4 + w] = a[w] * b[c * 4] + a[4 + w] * b[c * 4 + 1] + a[8 + w] * b[c * 4 + 2] + a[12 + w] * b[c * 4 + 3];
+    memcpy(r, t, sizeof t);
+}
+static void mat_rot(float* m, int axis, float deg, const float* about) {   /* rotation about a point */
+    float c = cosf(deg * 3.14159265f / 180), sn = sinf(deg * 3.14159265f / 180);
+    float r[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    int i = axis == 0 ? 1 : 0, j = axis == 2 ? 1 : 2;   /* the plane it turns in */
+    r[i * 4 + i] = c, r[j * 4 + j] = c, r[i * 4 + j] = sn, r[j * 4 + i] = -sn;
+    float t[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, about[0], about[1], about[2], 1};
+    float u[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -about[0], -about[1], -about[2], 1};
+    mat_mul(m, t, r);
+    mat_mul(m, m, u);
+}
+static void shim_glLoadMatrixf(void) {
+    static FARPROC real;
+    if (!real) real = gl_real("glLoadMatrixf");
+    uint32_t a0 = ARG(0);
+    if (g_gltrace) gl_note("glLoadMatrixf rot %.3g %.3g %.3g, at %.4g %.4g %.4g", pf(a0, 0), pf(a0, 1), pf(a0, 2), pf(a0, 12), pf(a0, 13), pf(a0, 14));
+    const float* m = (const float*)(uintptr_t)a0;
+    float out[16];
+    if (g_mmode == 0x1700 && (g_cam_yaw || g_cam_tilt)) {
+        static const float pivot[3] = {512, 250, 512};
+        float r[16], e[3];
+        memcpy(out, m, sizeof out);
+        mat_rot(r, 1, g_cam_yaw, pivot);
+        mat_mul(out, out, r);                        /* world turns under the camera */
+        for (int k = 0; k < 3; k++)                  /* where the pivot sits in eye space */
+            e[k] = out[k] * pivot[0] + out[4 + k] * pivot[1] + out[8 + k] * pivot[2] + out[12 + k];
+        mat_rot(r, 0, g_cam_tilt, e);
+        mat_mul(out, r, out);                        /* then the camera tips */
+        m = out;
+    }
+    ((void (WINAPI*)(const float*))real)(m);
+    g_esp += 4 + 4;
+}
 GL_SHIM(glColorPointer, 4, "glColorPointer %u %04X s%u", (g_cp = a3, g_cs = a2, a0), a1, a2)
 GL_SHIM(glColor4f, 4, "glColor4f %.2f %.2f %.2f %.2f", u2f(a0), u2f(a1), u2f(a2), u2f(a3))
 GL_SHIM(glColorMaterial, 2, "glColorMaterial %04X %04X", a0, a1)
@@ -986,6 +1042,8 @@ int main(int argc, char** argv) {
         }
         else if (!strcmp(argv[i], "--gl-only") && i + 1 < argc) strncpy(g_gl_only, argv[++i], sizeof g_gl_only - 1);
         else if (!strcmp(argv[i], "--gltrace")) g_gltrace = 1;
+        else if (!strcmp(argv[i], "--cam-yaw") && i + 1 < argc) g_cam_yaw = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--cam-tilt") && i + 1 < argc) g_cam_tilt = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--gltex")) g_gltrace = 2;   /* before --gltrace-busy */
         else if (!strcmp(argv[i], "--gltrace-busy") && i + 1 < argc) { char* e; if (!g_gltrace) g_gltrace = 1; g_gltrace_busy = strtol(argv[++i], &e, 0); if (*e == '@') g_busy_after = strtol(e + 1, NULL, 0); }
         else if (!strcmp(argv[i], "--gltrace-frame") && i + 1 < argc) g_gltrace = 1, g_gltrace_frame = strtol(argv[++i], NULL, 0);
@@ -1001,7 +1059,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--native-trace")) native32_trace_native = 1;
         else if (!strcmp(argv[i], "--callbacks")) native32_trace_callbacks = 1;
         else {
-            printf("usage: sc4 [--run] [--headless] [--sound] [--modeswitch] [--gamma] [--original] [--user-docs] [--trace-init] [--spy VA] [--monitor N] [--gl-hide EXT,...] [--gl-only EXT,...] [--gltrace] [--gltex] [--gltrace-frame N] [--gltrace-busy DRAWS[@FRAME]] [--noshim NAME,...] [--snap DIR] [--snap-every N] [--exe work\\sc4.exe] [--game game]\n"
+            printf("usage: sc4 [--run] [--headless] [--sound] [--modeswitch] [--gamma] [--original] [--user-docs] [--trace-init] [--spy VA] [--monitor N] [--cam-yaw DEG] [--cam-tilt DEG] [--gl-hide EXT,...] [--gl-only EXT,...] [--gltrace] [--gltex] [--gltrace-frame N] [--gltrace-busy DRAWS[@FRAME]] [--noshim NAME,...] [--snap DIR] [--snap-every N] [--exe work\\sc4.exe] [--game game]\n"
                    "           [--args \"-intro:off -w\"] [--watchdog S] [--native-trace] [--callbacks]\n");
             input_help();
             recomp_trace_help();

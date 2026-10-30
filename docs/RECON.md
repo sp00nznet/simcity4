@@ -175,6 +175,17 @@ the rest through `_initterm`'s constructor table and the GZCOM vtables.
    painted it, then `--gltrace` of `glMatrixMode`/`glLoadMatrixf` (the matrix loaded
    before each draw).
 
+14. **The camera (experiment).** The city view is 3D under an orthographic projection:
+   the view matrix is pitch 30, yaw 22.5 (rows 0.924 -0.191 0.331 / 0 0.866 0.5 /
+   -0.383 -0.462 0.8), and every scene matrix goes to `MODELVIEW` as view * object, the
+   projection separately. Terrain, water, roads, lots, cars and props are meshes;
+   buildings are pre-rendered sprites (the 256x256 DXT sheets), one set per rotation and
+   zoom. The host's `--cam-tilt DEG` / `--cam-yaw DEG` turn every modelview load: tilt
+   draws cleanly (a steeper view); yaw turns the land, roads and zones to any angle while
+   the building sprites stay where the game's camera put them. A real free camera would
+   drive the game's own camera (so it culls and places sprites for the new view), and
+   would need 3D buildings for anything but the four rotations it ships.
+
 Headless runs (and `--private-docs`) keep the game's Documents folder in `work\docs`, so a
 test never writes into the player's `Documents\SimCity 4` (an early run created `sc4.cfg`
 there; nothing else was touched).

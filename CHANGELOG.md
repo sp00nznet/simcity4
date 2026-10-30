@@ -21,6 +21,7 @@ versions follow [SemVer](https://semver.org/).
   waits for frame N instead of a time.
 - The lifted game loads a city, simulates and saves; the original loads that save.
   `tools/dbpf_diff.py` compares saves.
+- Experiment: `--cam-tilt DEG` / `--cam-yaw DEG` turn the city view's camera.
 
 ### Fixed
 - OpenGL city view: white terrain (textures capped at the mip level uploaded), pale water
