@@ -14,7 +14,9 @@
 ## Next
 - [x] OpenGL renderer path to the region view and a city (white terrain: texture max level)
 - [x] OpenGL: water renders pale in the city view (LIGHT0 left at GL defaults)
-- [ ] Load a city, run the simulation, save; compare against the original
+- [x] Load a city, run the simulation, save; compare against the original
+- [ ] OpenGL: the power plant's smoke draws as a blue wedge (`--original` too)
+- [ ] Day/night: lifted and original at different light for the same game date?
 - [ ] `--headless --record out.mp4` (section 10)
 - [ ] netlab recipe and a QA pass on testbox
 

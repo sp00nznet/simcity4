@@ -149,6 +149,21 @@ the rest through `_initterm`'s constructor table and the GZCOM vtables.
    Scripted input (`src/runtime/input.c`) gets there: `--click 616,330@10 --click 716,321@22
    --click 775,222@30` = main menu, Timbuktu, Getting Started, Start New City.
 
+12. **Load, simulate, save (2026-10-30).** The lifted game opens "Making Money Tutorial",
+   leaves the tutorial for normal play, simulates a month (advisor news arrives, the date
+   runs 11/11/08 to 12/22/08) and saves from the menu ("City Saved"). `--original` does the
+   same from the same script. Both saves hold the same 150 DBPF entries
+   (`tools/dbpf_diff.py`); contents differ, as two runs of the simulation do. The original
+   loads the lifted game's save (population 2,070, $49,304) and plays on. The script,
+   timed in frames so a busy machine can't throw it off:
+   `--click 616,330@150f --click 465,250@700f --click 571,228@1000f --click 905,285@2000f
+   --click 755,195@2300f --click 632,486@2900f --click 632,488@3600f --click 215,730@3800f
+   --click 310,730@3950f`. A test overwrites the city in `work\docs`;
+   `work\Timbuktu_pristine` holds the region as shipped.
+   Still open: a blue wedge where the power plant's smoke should be (`--original` too);
+   `CTRL+S` posted as messages doesn't save; the original's frame was at dusk, the lifted
+   one's in daylight, at the same game date (Deluxe's day/night cycle).
+
 Headless runs (and `--private-docs`) keep the game's Documents folder in `work\docs`, so a
 test never writes into the player's `Documents\SimCity 4` (an early run created `sc4.cfg`
 there; nothing else was touched).

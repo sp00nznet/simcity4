@@ -17,8 +17,15 @@ versions follow [SemVer](https://semver.org/).
   `--spy VA` logs one lifted function's indirect calls.
 - The game boots headless to its main menu, matching the original's frames.
 - Headless runs and `--private-docs` keep the game's Documents folder in `work\docs`.
+- Scripted input: `--click`/`--rclick X,Y@S`, `--key NAME@S` (`CTRL+NAME` too); `@Nf`
+  waits for frame N instead of a time.
+- The lifted game loads a city, simulates and saves; the original loads that save.
+  `tools/dbpf_diff.py` compares saves.
 
 ### Fixed
+- OpenGL city view: white terrain (textures capped at the mip level uploaded), pale water
+  (`LIGHT0` zeroed; SC4 lights on the CPU), black squares on lots and buildings (DXT1
+  uploaded with its alpha).
 - The registry Steam's install script writes on first launch (`Install Dir`, language,
   registration) is served from `24780_install.vdf` in memory (`steamreg.c`): a copy never
   launched through Steam, or a test VM, failed the app's init without it. Nothing is

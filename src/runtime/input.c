@@ -6,7 +6,12 @@
  *
  *   --click X,Y@S      left click at client X,Y, S seconds into the main loop
  *   --rclick X,Y@S     the same with the right button
- *   --key NAME@S       a key: a letter or digit, or ESC, ENTER, SPACE, TAB, F1..F12
+ *   --key NAME@S       a key: a letter or digit, or ESC, ENTER, SPACE, TAB, F1..F12;
+ *                      CTRL+NAME holds Control with it (CTRL+S saves the city)
+ *
+ * @Nf instead of @S waits for frame N: frames stop while the game loads and
+ * slow down with it on a busy machine, so a frame-timed script stays in step.
+ * Events run in the order given.
  *
  * SC4 also asks GetCursorPos where the mouse is, so while a scripted pointer
  * is set, the GetCursorPos shim answers with it (in screen coordinates).
@@ -20,7 +25,8 @@
 #include "input.h"
 
 #define MAX_EVENTS 64
-typedef struct { DWORD at_ms; int kind; int x, y; UINT vk; } ev_t;   /* kind: 1 click, 2 rclick, 3 key */
+typedef struct { DWORD at_ms; LONG at_frame; int kind; int x, y; UINT vk, ctrl; } ev_t;   /* at_frame 0: timed by at_ms */
+extern volatile LONG g_frames;   /* kind: 1 click, 2 rclick, 3 key */
 static ev_t g_ev[MAX_EVENTS];
 static int g_nev;
 static volatile HWND g_hwnd;
@@ -28,6 +34,7 @@ static volatile LONG g_loop_tick;     /* GetTickCount when the main loop began; 
 static volatile LONG g_have_ptr;
 static volatile LONG g_ptr_x, g_ptr_y;
 static volatile LONG g_down_vk;      /* the scripted button or key held down now, 0 if none */
+static volatile LONG g_ctrl;         /* scripted Control held */
 
 static UINT key_vk(const char* n) {
     static const struct { const char* name; UINT vk; } named[] = {
@@ -49,9 +56,11 @@ static UINT key_vk(const char* n) {
 static int parse(const char* opt, const char* v, ev_t* e) {
     const char* at = strrchr(v, '@');
     if (!at) return 0;
-    double s = atof(at + 1);
+    char* end;
+    double s = strtod(at + 1, &end);
     if (s < 0) return 0;
-    e->at_ms = (DWORD)(s * 1000.0);
+    if (*end == 'f') e->at_frame = (LONG)s;
+    else e->at_ms = (DWORD)(s * 1000.0);
     if (!strcmp(opt, "--key")) {
         char name[16];
         size_t n = (size_t)(at - v);
@@ -59,7 +68,8 @@ static int parse(const char* opt, const char* v, ev_t* e) {
         memcpy(name, v, n);
         name[n] = 0;
         e->kind = 3;
-        e->vk = key_vk(name);
+        e->ctrl = !_strnicmp(name, "CTRL+", 5);
+        e->vk = key_vk(name + (e->ctrl ? 5 : 0));
         return e->vk != 0;
     }
     e->kind = !strcmp(opt, "--rclick") ? 2 : 1;
@@ -97,6 +107,7 @@ int input_cursor(long* x, long* y) {
  * it is held; anything else is the real state (-1: ask Windows). */
 int input_key_state(int vk) {
     LONG d = g_down_vk;
+    if (g_ctrl && (vk == VK_CONTROL || vk == VK_LCONTROL)) return 0x8000;
     if (!d && !g_have_ptr) return -1;
     if (vk == (int)d) return 0x8000;
     if (vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON) return 0;   /* the real mouse is not ours */
@@ -119,33 +130,37 @@ static void click(int x, int y, int right) {
     PostMessageA(h, right ? WM_RBUTTONUP : WM_LBUTTONUP, 0, lp);
 }
 
-static void key(UINT vk) {
+static void key(UINT vk, int ctrl) {
     HWND h = g_hwnd;
-    UINT sc = MapVirtualKeyA(vk, MAPVK_VK_TO_VSC);
+    UINT sc = MapVirtualKeyA(vk, MAPVK_VK_TO_VSC), csc = MapVirtualKeyA(VK_CONTROL, MAPVK_VK_TO_VSC);
+    if (ctrl) { InterlockedExchange(&g_ctrl, 1); PostMessageA(h, WM_KEYDOWN, VK_CONTROL, 1 | (csc << 16)); Sleep(50); }
     InterlockedExchange(&g_down_vk, (LONG)vk);
     PostMessageA(h, WM_KEYDOWN, vk, 1 | (sc << 16));
-    if (vk >= '0' && vk <= 'Z') PostMessageA(h, WM_CHAR, vk >= 'A' ? vk + 32 : vk, 1 | (sc << 16));
+    if (ctrl && vk >= 'A' && vk <= 'Z') PostMessageA(h, WM_CHAR, vk - 'A' + 1, 1 | (sc << 16));
+    else if (vk >= '0' && vk <= 'Z') PostMessageA(h, WM_CHAR, vk >= 'A' ? vk + 32 : vk, 1 | (sc << 16));
     Sleep(150);
     InterlockedExchange(&g_down_vk, 0);
     PostMessageA(h, WM_KEYUP, vk, 1 | (sc << 16) | (1u << 30) | (1u << 31));
+    if (ctrl) {
+        Sleep(50);
+        PostMessageA(h, WM_KEYUP, VK_CONTROL, 1 | (csc << 16) | (1u << 30) | (1u << 31));
+        InterlockedExchange(&g_ctrl, 0);
+    }
 }
 
 static DWORD WINAPI script(LPVOID unused) {
     (void)unused;
     while (!g_loop_tick || !g_hwnd) Sleep(20);
     DWORD t0 = (DWORD)g_loop_tick;
-    /* Events in time order, whatever order they were given in. */
-    for (int done = 0; done < g_nev; done++) {
-        int k = -1;
-        for (int i = 0; i < g_nev; i++)
-            if (g_ev[i].kind && (k < 0 || g_ev[i].at_ms < g_ev[k].at_ms)) k = i;
+    for (int k = 0; k < g_nev; k++) {
         ev_t e = g_ev[k];
-        g_ev[k].kind = 0;
-        for (DWORD now; (int)((now = GetTickCount()) - (t0 + e.at_ms)) < 0; ) Sleep(10);
-        if (e.kind == 3) printf("[input] key 0x%02X at %.1f s\n", e.vk, e.at_ms / 1000.0);
-        else printf("[input] %s %d,%d at %.1f s\n", e.kind == 2 ? "rclick" : "click", e.x, e.y, e.at_ms / 1000.0);
+        if (e.at_frame) while (g_frames < e.at_frame) Sleep(10);
+        else for (DWORD now; (int)((now = GetTickCount()) - (t0 + e.at_ms)) < 0; ) Sleep(10);
+        double s = (GetTickCount() - t0) / 1000.0;
+        if (e.kind == 3) printf("[input] key %s0x%02X at %.1f s, frame %ld\n", e.ctrl ? "CTRL+" : "", e.vk, s, g_frames);
+        else printf("[input] %s %d,%d at %.1f s, frame %ld\n", e.kind == 2 ? "rclick" : "click", e.x, e.y, s, g_frames);
         fflush(stdout);
-        if (e.kind == 3) key(e.vk);
+        if (e.kind == 3) key(e.vk, e.ctrl);
         else click(e.x, e.y, e.kind == 2);
     }
     return 0;

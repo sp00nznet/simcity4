@@ -293,7 +293,7 @@ static void shim_MessageBoxA(void) {
 }
 
 /* ---- milestones ------------------------------------------------------------- */
-static volatile LONG g_frames;
+volatile LONG g_frames;   /* frames presented; input.c times @Nf events by it */
 
 static const char* g_snap_dir;   /* --snap: defined with the software driver's below */
 static LONG g_snap_every;
