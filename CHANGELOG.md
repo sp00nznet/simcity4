@@ -5,6 +5,11 @@ versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-30
+
+The first release: regions and cities load, simulate and save on OpenGL,
+set up by the installer (`SimCity4-Recomp-Installer-windows-x64.exe`).
+
 ### Added
 - Reconnaissance of the Steam copy (docs/RECON.md).
 - The pipeline from KotOR's shape: `tools/setup.ps1` (unwrap, vtable scan,
