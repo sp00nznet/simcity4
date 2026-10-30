@@ -5,6 +5,10 @@ versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `--snap-from N`: no snapshots before frame N, for dense captures.
+- README: an animated zoom into a city, and OpenGL screenshots in place of the software renderer's.
+
 ## [0.1.0] - 2026-10-30
 
 The first release: regions and cities load, simulate and save on OpenGL,

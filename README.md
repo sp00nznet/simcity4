@@ -1,5 +1,7 @@
 # SimCity 4 Deluxe — Static Recompilation
 
+![Zooming into a city in the recompiled game](docs/screenshots/hero.gif)
+
 Static recompilation of **SimCity 4 Deluxe** (Maxis, Steam build of
 `SimCity 4.exe`, linked 2010-06-11 with MSVC 7.1) from its shipping binary to
 native C, hosted on pcrecomp's `native32` runtime. No emulator.
@@ -34,15 +36,14 @@ settings menu).
 
 ## Screenshots
 
+The recompiled game's own frames, on OpenGL (`--snap`):
+
 | | |
 |---|---|
-| ![A city, OpenGL](docs/screenshots/city.png) | ![Region view, OpenGL](docs/screenshots/region.png) |
-| The Making Money tutorial city, OpenGL | The Timbuktu region, OpenGL |
-| ![Main menu](docs/screenshots/main-menu.png) | ![Splash](docs/screenshots/splash.png) |
-| The main menu (software, headless) | The splash screen (software, headless) |
-
-The cloud streaks on the menu are the game's: the shipping code under the same
-host draws the same ([main-menu-original.png](docs/screenshots/main-menu-original.png)).
+| ![A city](docs/screenshots/city.png) | ![Close up](docs/screenshots/city-close.png) |
+| The Making Money tutorial city | Zoomed in |
+| ![Region view](docs/screenshots/region.png) | ![Splash](docs/screenshots/splash.png) |
+| The Timbuktu region | The splash screen |
 
 ## Getting Started
 
@@ -91,6 +92,7 @@ build\sc4.exe --run --headless     no window on screen, message boxes printed
 build\sc4.exe --run --args "-intro:off -w -d:Software"   the game's own switches
 build\sc4.exe --run --original     the shipping machine code under the same host (to compare)
 build\sc4.exe --run --headless --snap shots --snap-every 500   save every 500th frame as a BMP
+buildsc4.exe --run --snap shots --snap-every 3 --snap-from 2400   every 3rd frame from frame 2400 (for a GIF)
 build\sc4.exe --run --spy 877D7A   log the indirect calls one lifted function makes
 ```
 

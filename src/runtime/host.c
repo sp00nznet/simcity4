@@ -297,7 +297,7 @@ static void shim_MessageBoxA(void) {
 volatile LONG g_frames;   /* frames presented; input.c times @Nf events by it */
 
 static const char* g_snap_dir;   /* --snap: defined with the software driver's below */
-static LONG g_snap_every;
+static LONG g_snap_every, g_snap_from;   /* --snap-from N: no snaps before frame N */
 
 /* --snap under OpenGL: the back buffer just before the swap, read with
  * glReadPixels (kotor's recorder does the same), written bottom-up as BMP. */
@@ -340,7 +340,7 @@ static void shim_SwapBuffers(void) {
     HDC dc = (HDC)(uintptr_t)ARG(0);
     HWND w = WindowFromDC(dc);
     if (g_headless && w && IsWindowVisible(w)) ShowWindow(w, SW_HIDE);
-    if (g_snap_dir && w && (n == 1 || n % g_snap_every == 0)) snap_gl(w, n);
+    if (g_snap_dir && w && n >= g_snap_from && (n == 1 || n % g_snap_every == 0)) snap_gl(w, n);
     g_eax = SwapBuffers(dc);
     g_esp += 4 + 1 * 4;
 }
@@ -388,7 +388,7 @@ static void shim_BitBlt(void) {
     if (a[2] == 0) {                           /* y = 0: a new frame */
         LONG n = InterlockedIncrement(&g_frames);
         if (n == 1 || n == 60 || n % 1000 == 0) printf("[host] frame %ld presented (software)\n", n);
-        if (g_snap_dir && (n == 1 || n % g_snap_every == 0)) snap_surface((HDC)(uintptr_t)a[5], n);
+        if (g_snap_dir && n >= g_snap_from && (n == 1 || n % g_snap_every == 0)) snap_surface((HDC)(uintptr_t)a[5], n);
     }
     g_eax = BitBlt((HDC)(uintptr_t)a[0], (int)a[1], (int)a[2], (int)a[3], (int)a[4],
                    (HDC)(uintptr_t)a[5], (int)a[6], (int)a[7], a[8]);
@@ -1033,6 +1033,7 @@ int main(int argc, char** argv) {
             g_snap_dir = snap_full;
         }
         else if (!strcmp(argv[i], "--snap-every") && i + 1 < argc) g_snap_every = strtol(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--snap-from") && i + 1 < argc) g_snap_from = strtol(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--monitor") && i + 1 < argc) {
             int want = atoi(argv[++i]);
             EnumDisplayMonitors(NULL, NULL, find_monitor, want);
@@ -1059,7 +1060,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--native-trace")) native32_trace_native = 1;
         else if (!strcmp(argv[i], "--callbacks")) native32_trace_callbacks = 1;
         else {
-            printf("usage: sc4 [--run] [--headless] [--sound] [--modeswitch] [--gamma] [--original] [--user-docs] [--trace-init] [--spy VA] [--monitor N] [--cam-yaw DEG] [--cam-tilt DEG] [--gl-hide EXT,...] [--gl-only EXT,...] [--gltrace] [--gltex] [--gltrace-frame N] [--gltrace-busy DRAWS[@FRAME]] [--noshim NAME,...] [--snap DIR] [--snap-every N] [--exe work\\sc4.exe] [--game game]\n"
+            printf("usage: sc4 [--run] [--headless] [--sound] [--modeswitch] [--gamma] [--original] [--user-docs] [--trace-init] [--spy VA] [--monitor N] [--cam-yaw DEG] [--cam-tilt DEG] [--gl-hide EXT,...] [--gl-only EXT,...] [--gltrace] [--gltex] [--gltrace-frame N] [--gltrace-busy DRAWS[@FRAME]] [--noshim NAME,...] [--snap DIR] [--snap-every N] [--snap-from N] [--exe work\\sc4.exe] [--game game]\n"
                    "           [--args \"-intro:off -w\"] [--watchdog S] [--native-trace] [--callbacks]\n");
             input_help();
             recomp_trace_help();
