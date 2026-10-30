@@ -6,7 +6,7 @@
 # builds the function catalog, lifts it to C, builds the 32-bit host and leaves
 # a launcher. Each step is skipped when its output already exists (-Force redoes
 # them). Everything it does goes to setup.log. Nothing is downloaded or copied
-# out of your game folder except AppsSimCity 4.exe, which stays on this machine.
+# out of your game folder except Apps\SimCity 4.exe, which stays on this machine.
 #   -GameDir <folder>   skip the question (-Game works too)
 #   -Yes                answer yes to every install question
 # Under recomp-launcher (RECOMP_LAUNCHER=1) it does not wait for Enter at the end.
@@ -154,7 +154,7 @@ if ((Is-Install 'game') -and -not $Force) {
   if (-not (Is-Install $Game) -and $Yes) { Fail "SimCity 4 wasn't found. Give its folder (the one with Apps and SimCity_1.dat) with -GameDir." }
   while (-not (Is-Install $Game)) {
     $Game = (Read-Host "  Paste the folder SimCity 4 Deluxe is installed in (the one with Apps and SimCity_1.dat)").Trim('"', ' ')
-    if (-not (Is-Install $Game)) { Say "  No AppsSimCity 4.exe and SimCity_1.dat in that folder." 'Yellow' }
+    if (-not (Is-Install $Game)) { Say "  No Apps\SimCity 4.exe and SimCity_1.dat in that folder." 'Yellow' }
   }
   # A junction, not a copy: the game data is 1.2 GB and is read in place. No admin needed.
   if (Test-Path 'game') { cmd /c rmdir game | Out-Null }
@@ -207,9 +207,9 @@ Step 8 "Making the launcher"
 $lnk = Join-Path $Root 'SimCity 4 (recomp).cmd'
 Set-Content -Path $lnk -Encoding ASCII -Value @(
   '@echo off',
-  'rem Runs the recompiled game. It is muted until sound has been tested: add --sound to hear it.',
+  'rem Runs the recompiled game, windowed on OpenGL (the tested driver). It is muted: add --sound to hear it.',
   'cd /d "%~dp0"',
-  'start "" build\sc4.exe --run')
+  'start "" build\sc4.exe --run --args "-intro:off -w -d:OpenGL"')
 Say "  $lnk"
 
 Write-Host ""

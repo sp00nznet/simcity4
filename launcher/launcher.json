@@ -3,7 +3,7 @@
   "repo": "sp00nznet/simcity4",
   "accent": "#3c8cc8",
   "note": {
-    "windows": "Early bring-up: this builds the recompiled host but the game does not play yet. The first build takes a long time and several GB. Python, its packages, CMake and Ninja are installed if they are missing; Visual Studio 2022 (or its Build Tools) with 'Desktop development with C++' must already be installed."
+    "windows": "Early but playable: regions and cities load, simulate and save, windowed on OpenGL and muted for now. The first build takes 30 to 90 minutes and about 3 GB. Python, its packages, CMake and Ninja are installed if they are missing; Visual Studio 2022 (or its Build Tools) with 'Desktop development with C++' must already be installed."
   },
   "game": {
     "name": "SimCity 4 Deluxe",

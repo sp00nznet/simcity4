@@ -12,45 +12,50 @@ the lifter runs on your machine and writes the C into a gitignored folder.
 
 ## Status
 
-**P1, boots to the region view.** The whole game lifts with no errors. The
-recompiled program loads a region and draws it on the GPU (OpenGL, with sound
-on), and headless it reaches the main menu on the software renderer, frame for
-frame like the original code under the same host. A city has not been entered
-yet: there is no input scripting. See [docs/RECON.md](docs/RECON.md) for the binary and the bring-up.
+**Early but playable.** The whole game lifts with no errors. On OpenGL the
+recompiled program loads a region, enters a city, simulates it and saves it,
+and the shipping game loads that save. Scripted runs check this end to end:
+see [docs/RECON.md](docs/RECON.md) for the binary and the bring-up.
 
 | Area | State |
 |---|---|
-| Steam wrapper | Removed statically (needs pcrecomp#149) |
+| Steam wrapper | Removed statically |
 | Function catalog | 50,604 functions, 97% of `.text`, from disasm32 seeded with 18,437 vtable methods |
 | Lift | 50,766 functions, 0 lift errors, 10.2M lines of C |
-| Startup | CRT, GZCOM framework, app init, main loop (all lifted) |
-| Rendering | Software driver: splash and main menu, matching the original's frames; the generated span code runs natively (needs pcrecomp#153) |
-| Sound | Runs with an audio device (muted by default, `--sound` to hear it); `-audio:off` is added on a machine with none |
-| OpenGL driver | Region view, ~50 frames a second on monitor 2 (`--monitor 2 --args "-intro:off -w -d:OpenGL"`) |
+| OpenGL driver | Regions and cities, windowed. Fixed along the way: white terrain, pale water, black squares on lots, and a stray blue wedge that is a bug in the game itself |
+| Simulation and saves | A month of a city simulated and saved; the original game loads the save with the same population and funds |
+| Software driver | Splash and main menu, matching the original's frames |
+| Sound | Works with an audio device, muted by default (`--sound` to hear it) |
 | DirectX 7 driver | Not tried: it asks for exclusive fullscreen |
-| Input, regions, cities | Not tried yet |
+
+Not yet: a full play session by hand, day/night lighting checked against the
+original, and the extras on the [roadmap](ROADMAP.md) (camera, recording, a
+settings menu).
 
 ## Screenshots
 
-Captured headless with `--snap` (the recompiled game's own frames, nothing on screen):
-
 | | |
 |---|---|
-| ![Region view, OpenGL](docs/screenshots/region.png) | ![Splash](docs/screenshots/splash.png) |
-| The Timbuktu region, OpenGL | The splash screen, loading in (software, headless) |
-| ![Main menu](docs/screenshots/main-menu.png) | |
-| The main menu over its clouds (software, headless) | |
+| ![A city, OpenGL](docs/screenshots/city.png) | ![Region view, OpenGL](docs/screenshots/region.png) |
+| The Making Money tutorial city, OpenGL | The Timbuktu region, OpenGL |
+| ![Main menu](docs/screenshots/main-menu.png) | ![Splash](docs/screenshots/splash.png) |
+| The main menu (software, headless) | The splash screen (software, headless) |
 
-The cloud streaks are the game's: the shipping code under the same host draws
-the same ([main-menu-original.png](docs/screenshots/main-menu-original.png)).
+The cloud streaks on the menu are the game's: the shipping code under the same
+host draws the same ([main-menu-original.png](docs/screenshots/main-menu-original.png)).
 
 ## Getting Started
 
 You need Windows 10/11, your own **SimCity 4 Deluxe** installed (Steam), Visual
 Studio 2022 (or its Build Tools) with *Desktop development with C++*, and about
-3 GB free. pcrecomp is expected beside this folder (`..\pcrecomp`); until
-its open PRs merge (#149 for the Steam wrapper, #153 for the generated-code support in
-native32), build against a checkout that has both.
+3 GB free. pcrecomp is expected beside this folder (`..\pcrecomp`); the setup
+downloads it if it is missing.
+
+### Installer
+
+The easiest way: download `SimCity4-Recomp-Installer-windows-x64.exe` from the
+[latest release](https://github.com/sp00nznet/simcity4/releases/latest). It
+finds your Steam copy, builds, and gives you a **Play** button.
 
 ### Quick start
 

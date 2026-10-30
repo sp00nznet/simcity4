@@ -24,10 +24,10 @@ SOFTWARE.
 
 This licence covers what is actually ours in this repository: the setup
 script, the host runtime, the tools, the analysis summaries and the
-documentation. It does NOT cover Star Wars: Knights of the Old Republic itself.
+documentation. It does NOT cover SimCity 4 itself.
 
-Star Wars: Knights of the Old Republic is (c) 2003 BioWare / LucasArts, and
-Star Wars is a trademark of Lucasfilm Ltd. None of it is ours to license. Its
+SimCity 4 Deluxe is (c) 2003 Maxis / Electronic Arts, and SimCity is a
+trademark of Electronic Arts Inc. None of it is ours to license. Its
 executables, data, movies, music and art are not in this repository and are
 excluded by .gitignore.
 
