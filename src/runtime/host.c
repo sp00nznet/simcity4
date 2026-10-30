@@ -464,12 +464,12 @@ static void gl_frame_end(void) {
 }
 
 static void gl_note(const char* fmt, ...) {
-    static char seen[4096][96];
+    static char seen[4096][160];
     static int nseen;
     static CRITICAL_SECTION cs;
     static LONG init;
     if (!InterlockedExchange(&init, 1)) InitializeCriticalSection(&cs);
-    char line[96];
+    char line[160];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(line, sizeof line, fmt, ap);
@@ -493,6 +493,7 @@ static void gl_note(const char* fmt, ...) {
 
 static FARPROC gl_real(const char* name) { return GetProcAddress(GetModuleHandleA("opengl32.dll"), name); }
 
+#define GL_CALL0 ((void (WINAPI*)(void))real)()
 #define GL_CALL1 ((void (WINAPI*)(uint32_t))real)(a0)
 #define GL_CALL2 ((void (WINAPI*)(uint32_t,uint32_t))real)(a0,a1)
 #define GL_CALL3 ((void (WINAPI*)(uint32_t,uint32_t,uint32_t))real)(a0,a1,a2)
@@ -557,6 +558,10 @@ static double pf(uint32_t p, int i) { return p ? ((const float*)(uintptr_t)p)[i]
 GL_SHIM(glColorMask, 4, "glColorMask %u %u %u %u", a0, a1, a2, a3)
 GL_SHIM(glDepthMask, 1, "glDepthMask %u", a0)
 GL_SHIM(glDepthFunc, 1, "glDepthFunc %04X", a0)
+GL_SHIM(glVertexPointer, 4, "glVertexPointer %u %04X s%u", a0, a1, a2)
+GL_SHIM(glMatrixMode, 1, "glMatrixMode %04X", a0)
+GL_SHIM(glLoadIdentity, 0, "glLoadIdentity")
+GL_SHIM(glLoadMatrixf, 1, "glLoadMatrixf rot %.3g %.3g %.3g, at %.4g %.4g %.4g", pf(a0, 0), pf(a0, 1), pf(a0, 2), pf(a0, 12), pf(a0, 13), pf(a0, 14))
 GL_SHIM(glColorPointer, 4, "glColorPointer %u %04X s%u", (g_cp = a3, g_cs = a2, a0), a1, a2)
 GL_SHIM(glColor4f, 4, "glColor4f %.2f %.2f %.2f %.2f", u2f(a0), u2f(a1), u2f(a2), u2f(a3))
 GL_SHIM(glColorMaterial, 2, "glColorMaterial %04X %04X", a0, a1)
@@ -715,6 +720,10 @@ static native32_shim_t g_shims[] = {
     { "glDepthMask", shim_glDepthMask },
     { "glDepthFunc", shim_glDepthFunc },
     { "glColorPointer", shim_glColorPointer },
+    { "glVertexPointer", shim_glVertexPointer },
+    { "glMatrixMode", shim_glMatrixMode },
+    { "glLoadIdentity", shim_glLoadIdentity },
+    { "glLoadMatrixf", shim_glLoadMatrixf },
     { "glColor4f", shim_glColor4f },
     { "glColorMaterial", shim_glColorMaterial },
     { "glMaterialfv", shim_glMaterialfv },

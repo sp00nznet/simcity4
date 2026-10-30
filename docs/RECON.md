@@ -160,9 +160,20 @@ the rest through `_initterm`'s constructor table and the GZCOM vtables.
    --click 755,195@2300f --click 632,486@2900f --click 632,488@3600f --click 215,730@3800f
    --click 310,730@3950f`. A test overwrites the city in `work\docs`;
    `work\Timbuktu_pristine` holds the region as shipped.
-   Still open: a blue wedge where the power plant's smoke should be (`--original` too);
-   `CTRL+S` posted as messages doesn't save; the original's frame was at dusk, the lifted
+   Still open: `CTRL+S` posted as messages doesn't save; the original's frame was at dusk, the lifted
    one's in daylight, at the same game date (Deluxe's day/night cycle).
+
+13. **Fixed: the blue wedge (a bug in the game).** A blue sheet across the city near the
+   power plant, `--original` too. It is the water-edge wall the city tile shows where the
+   ground is below sea level (x = 0, heights 184..250; drawn by 0x0075B460 under
+   0x0075BFD0), drawn with the last car's modelview. The renderer's "load the camera"
+   (0x007D2D20) skips the load while its view's flag (+0x138) says the camera is current,
+   but several views share the one GL modelview, and another view's object matrices
+   (0x007D3400) leave that flag stale. `run_lift.py` `PATCHES` drops the skip, so the camera
+   is always loaded. Lifted build only: `--original` still shows the wedge. Found by
+   reading back the framebuffer after each draw in one frame to find the draw that
+   painted it, then `--gltrace` of `glMatrixMode`/`glLoadMatrixf` (the matrix loaded
+   before each draw).
 
 Headless runs (and `--private-docs`) keep the game's Documents folder in `work\docs`, so a
 test never writes into the player's `Documents\SimCity 4` (an early run created `sc4.cfg`

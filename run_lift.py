@@ -68,6 +68,28 @@ FORWARD = {
     0x009EF84F: 'native32_shim_CxxThrowException',
 }
 
+# Fixes to the game itself, applied to the lifted C: {function: [(old, new)]},
+# each old string found exactly once in that function's body (else the lift
+# fails, so a changed lifter can't drop a fix silently).
+PATCHES = {
+    # The renderer's "load the camera" (cS3D view, 0x007D2D20) skips the load
+    # when its own flag (+0x138) says the camera is current. Several views share
+    # the one GL modelview, and another view's object matrix (cars) leaves this
+    # flag stale: the water-edge walls (0x0075B460) were then drawn with the
+    # last car's matrix, a blue wedge across the city (--original too). Always
+    # load; one matrix upload per call.
+    0x007D2D20: [('    if (TEST_NZ(_flag_a, _flag_b)) goto L_007D2F47; /* 0x007D2D2B: jne 0x7d2f47 */',
+                  '    /* 0x007D2D2B: jne 0x7d2f47 -- patched out (run_lift.py PATCHES) */')],
+}
+
+
+def apply_patches(addr, body):
+    for old, new in PATCHES.get(addr, ()):
+        if body.count(old) != 1:
+            raise RuntimeError('patch for 0x%08X no longer matches: %r' % (addr, old))
+        body = body.replace(old, new)
+    return body
+
 
 def load_seeds(path):
     """Addresses from a seed file: a list of {'address': va} or of plain VAs."""
@@ -182,7 +204,7 @@ def main():
         except Exception as e:                      # noqa: BLE001 -- counted, not hidden
             body = '/* ERROR %s: %s */\nvoid %s(void) { }\n' % (name, e, name)
             errors += 1
-        chunk.append((body, addr, name))
+        chunk.append((apply_patches(addr, body), addr, name))
         entries.append((addr, name))
         if len(chunk) >= args.split:
             flush()

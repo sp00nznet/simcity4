@@ -26,6 +26,9 @@ versions follow [SemVer](https://semver.org/).
 - OpenGL city view: white terrain (textures capped at the mip level uploaded), pale water
   (`LIGHT0` zeroed; SC4 lights on the CPU), black squares on lots and buildings (DXT1
   uploaded with its alpha).
+- A blue wedge across the city in OpenGL, a bug in the game itself: the water-edge walls
+  were drawn with a car's matrix. `run_lift.py` gained `PATCHES` (fixes applied to the
+  lifted C); this is the first.
 - The registry Steam's install script writes on first launch (`Install Dir`, language,
   registration) is served from `24780_install.vdf` in memory (`steamreg.c`): a copy never
   launched through Steam, or a test VM, failed the app's init without it. Nothing is
