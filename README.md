@@ -92,7 +92,7 @@ build\sc4.exe --run --headless     no window on screen, message boxes printed
 build\sc4.exe --run --args "-intro:off -w -d:Software"   the game's own switches
 build\sc4.exe --run --original     the shipping machine code under the same host (to compare)
 build\sc4.exe --run --headless --snap shots --snap-every 500   save every 500th frame as a BMP
-buildsc4.exe --run --snap shots --snap-every 3 --snap-from 2400   every 3rd frame from frame 2400 (for a GIF)
+build\sc4.exe --run --snap shots --snap-every 3 --snap-from 2400   every 3rd frame from frame 2400 (for a GIF)
 build\sc4.exe --run --spy 877D7A   log the indirect calls one lifted function makes
 ```
 
