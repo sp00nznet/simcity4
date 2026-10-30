@@ -6,13 +6,14 @@
 - [x] Lift the OEP closure, build, and boot the CRT into `WinMain`
 - [x] Lift everything (`--all`); boot to the main menu headless with the software renderer
 - [ ] Conformance harness: milestone lines (framework phase 7, first frame, region view, city load)
-- [ ] Input scripting (kotor's `input.c`): click into a region from the menu
+- [x] Input scripting (kotor's `input.c`): click into a region from the menu
 - [ ] Toolkit: disasm32 missed 17 `mov reg, offset fn` callbacks (seeded here for now)
 - [ ] Toolkit: detect a statically linked `_CxxThrowException` instead of `FORWARD`
 - [ ] Speed: lifted runs the menu at a third of the original's frame rate
 
 ## Next
-- [ ] OpenGL renderer path to the region view
+- [x] OpenGL renderer path to the region view and a city (white terrain: texture max level)
+- [ ] OpenGL: water renders pale in the city view
 - [ ] Load a city, run the simulation, save; compare against the original
 - [ ] `--headless --record out.mp4` (section 10)
 - [ ] netlab recipe and a QA pass on testbox

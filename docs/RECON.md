@@ -130,6 +130,17 @@ the rest through `_initterm`'s constructor table and the GZCOM vtables.
    `Graphics Options.sgr` in `work\docs\SimCity 4` so it never throws) draws the same
    frames, cloud streaks included. Speed: about 110 frames a second lifted, 340 original,
    on the main menu.
+11. **Fixed (2026-10-29): white city terrain on OpenGL** (`-d:OpenGL`), in `--original`
+   too, so a modern-driver problem, not the lift. SC4 uploads only level 0 of its terrain
+   textures and never sets their min filter (it caches filter state per texture unit, the
+   Direct3D way), so they keep GL's default `GL_NEAREST_MIPMAP_LINEAR`: incomplete, and
+   sampled as white. The additive splatting passes (`SRC_ALPHA, ONE`) then sum to white.
+   The host's `glTexImage2D` / `glCompressedTexImage2DARB` shims now cap
+   `GL_TEXTURE_MAX_LEVEL` at the level uploaded. Found with `--gltrace-busy 100@1500`
+   (every GL call in the first busy city frame) and `--gltex` (what the driver holds for
+   the texture each draw samples). Water still looks pale: next.
+   Scripted input (`src/runtime/input.c`) gets there: `--click 616,330@10 --click 716,321@22
+   --click 775,222@30` = main menu, Timbuktu, Getting Started, Start New City.
 
 Headless runs (and `--private-docs`) keep the game's Documents folder in `work\docs`, so a
 test never writes into the player's `Documents\SimCity 4` (an early run created `sc4.cfg`
@@ -138,4 +149,7 @@ there; nothing else was touched).
 Host diagnostics: `[host] framework phase N` as startup moves, `[host] C++ throw <type>` for
 every guest throw (with a `cParseError`'s message), `--trace-init` for the component loop,
 `--native-trace` for every Windows call, `--spy VA` for one function's indirect calls,
-`--snap DIR` for frames, `NATIVE32_TRACE_EH=1` for guest exceptions.
+`--snap DIR` for frames, `NATIVE32_TRACE_EH=1` for guest exceptions, `--gltrace` (each
+distinct texture/state GL call once), `--gltrace-frame N` / `--gltrace-busy DRAWS[@FRAME]`
+(every GL call in one frame), `--gltex`, `--gl-hide`/`--gl-only EXT,...` (filter
+`GL_EXTENSIONS`; hiding `GL_KTX_buffer_region` drops SC4 to software), `--noshim NAME,...`.

@@ -25,6 +25,7 @@
 #include "recomp_trace.h"
 #include "oracle.h"
 #include "steamreg.h"
+#include "input.h"
 
 extern const uint32_t sc4_entry_va;  /* recomp_dispatch.c */
 
@@ -214,9 +215,32 @@ static void shim_CreateWindowExA(void) {
     DWORD err = h ? 0 : GetLastError();
     printf("[host] CreateWindowExA(\"%s\", %dx%d) -> %p (error %lu)\n",
            a[2] && HIWORD(a[2]) ? (const char*)(uintptr_t)a[2] : "", (int)a[6], (int)a[7], (void*)h, err);
+    if (h && a[2] && HIWORD(a[2]) && !strncmp((const char*)(uintptr_t)a[2], "GDriverWindow", 13)) {
+        input_on_window(h);                   /* where scripted input goes */
+    }
     SetLastError(err);
     g_eax = (uint32_t)(uintptr_t)h;
     g_esp += 4 + 12 * 4;
+}
+
+static void shim_GetCursorPos(void) {
+    POINT* p = (POINT*)(uintptr_t)ARG(0);
+    long x, y;
+    if (p && input_cursor(&x, &y)) { p->x = x; p->y = y; g_eax = TRUE; }
+    else g_eax = GetCursorPos(p);
+    g_esp += 4 + 1 * 4;
+}
+
+static void shim_GetAsyncKeyState(void) {
+    int vk = (int)ARG(0), st = input_key_state(vk);
+    g_eax = st >= 0 ? (uint32_t)st : (uint32_t)(uint16_t)GetAsyncKeyState(vk);
+    g_esp += 4 + 1 * 4;
+}
+
+static void shim_GetKeyState(void) {
+    int vk = (int)ARG(0), st = input_key_state(vk);
+    g_eax = st >= 0 ? (uint32_t)(st ? 0xFF80 : 0) : (uint32_t)(uint16_t)GetKeyState(vk);
+    g_esp += 4 + 1 * 4;
 }
 
 static void shim_ShowWindow(void) {
@@ -306,7 +330,10 @@ static void snap_gl(HWND w, LONG n) {
     free(px);
 }
 
+static void gl_frame_end(void);
+
 static void shim_SwapBuffers(void) {
+    gl_frame_end();
     LONG n = InterlockedIncrement(&g_frames);
     if (n == 1 || n == 60 || n % 1000 == 0) printf("[host] frame %ld presented (OpenGL)\n", n);
     HDC dc = (HDC)(uintptr_t)ARG(0);
@@ -367,6 +394,254 @@ static void shim_BitBlt(void) {
     g_esp += 4 + 9 * 4;
 }
 
+/* --gl-hide A,B: glGetString(GL_EXTENSIONS) without those names, to steer the
+ * OpenGL driver off a path a modern driver renders wrong. */
+static char g_gl_hide[512];
+static char g_gl_only[512];   /* --gl-only A,B: just these, the ones the driver has */
+
+static void shim_glGetString(void) {
+    typedef const char* (WINAPI *gs_t)(unsigned);
+    static gs_t real;
+    static char filtered[1 << 16];
+    if (!real) real = (gs_t)GetProcAddress(GetModuleHandleA("opengl32.dll"), "glGetString");
+    unsigned name = ARG(0);
+    const char* s = real(name);
+    if (name == 0x1F03 /* GL_EXTENSIONS */ && s && (g_gl_hide[0] || g_gl_only[0])) {
+        size_t o = 0;
+        const char* p = s;
+        while (*p) {
+            while (*p == ' ') p++;
+            const char* e = p;
+            while (*e && *e != ' ') e++;
+            size_t n = (size_t)(e - p);
+            char tok[128];
+            int hide = 0;
+            if (n && n < sizeof tok) {
+                memcpy(tok, p, n);
+                tok[n] = 0;
+                const char* h = strstr(g_gl_hide, tok);
+                hide = h && (h == g_gl_hide || h[-1] == ',') && (h[n] == ',' || !h[n]);
+                if (g_gl_only[0]) {
+                    const char* k = strstr(g_gl_only, tok);
+                    hide |= !(k && (k == g_gl_only || k[-1] == ',') && (k[n] == ',' || !k[n]));
+                }
+            }
+            if (n && !hide && o + n + 2 < sizeof filtered) { memcpy(filtered + o, p, n); o += n; filtered[o++] = ' '; }
+            p = e;
+        }
+        filtered[o] = 0;
+        static LONG once;
+        if (!InterlockedExchange(&once, 1))
+            printf("[host] GL_EXTENSIONS: %zu bytes, %zu after hiding %s\n", strlen(s), o, g_gl_hide);
+        s = filtered;
+    }
+    g_eax = (uint32_t)(uintptr_t)s;
+    g_esp += 4 + 1 * 4;
+}
+
+/* --gltrace: each distinct texture/state GL call once, with the frame it first
+ * happened in, to see how the city view sets up terrain texturing.
+ * ponytail: linear dedup over 4096 lines; enough for one city load. */
+static int g_gltrace;
+static long g_gltrace_frame = -1;   /* --gltrace-frame N: every call in frame N, in order */
+static long g_gltrace_busy;         /* --gltrace-busy N: every call in the first frame with N+ draws */
+static char g_busy_buf[8 << 20];
+static size_t g_busy_len;
+static long g_busy_draws;
+static long g_busy_after;          /* ...@F: not before frame F */
+
+static void gl_frame_end(void) {
+    static int dumped;
+    if (!g_gltrace_busy || dumped) return;
+    if (g_busy_draws >= g_gltrace_busy && g_frames >= g_busy_after) {
+        printf("[host] frame %ld: %ld draws, its GL calls follow\n", g_frames + 1, g_busy_draws);
+        fwrite(g_busy_buf, 1, g_busy_len, stdout);
+        fflush(stdout);
+        dumped = 1;
+    }
+    g_busy_len = 0;
+    g_busy_draws = 0;
+}
+
+static void gl_note(const char* fmt, ...) {
+    static char seen[4096][96];
+    static int nseen;
+    static CRITICAL_SECTION cs;
+    static LONG init;
+    if (!InterlockedExchange(&init, 1)) InitializeCriticalSection(&cs);
+    char line[96];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    if (g_gltrace_busy) {
+        int n = snprintf(g_busy_buf + g_busy_len, sizeof g_busy_buf - g_busy_len, "[gl.] %s\n", line);
+        if (n > 0 && g_busy_len + n < sizeof g_busy_buf) g_busy_len += n;
+        if (!strncmp(line, "glDraw", 6)) g_busy_draws++;
+        return;
+    }
+    if (g_gltrace_frame >= 0) { if (g_frames == g_gltrace_frame) printf("[gl.] %s\n", line); return; }
+    EnterCriticalSection(&cs);
+    int i = 0;
+    while (i < nseen && strcmp(seen[i], line)) i++;
+    if (i == nseen && nseen < 4096) {
+        strcpy(seen[nseen++], line);
+        printf("[gl] f%ld %s\n", g_frames, line);
+    }
+    LeaveCriticalSection(&cs);
+}
+
+static FARPROC gl_real(const char* name) { return GetProcAddress(GetModuleHandleA("opengl32.dll"), name); }
+
+#define GL_CALL1 ((void (WINAPI*)(uint32_t))real)(a0)
+#define GL_CALL2 ((void (WINAPI*)(uint32_t,uint32_t))real)(a0,a1)
+#define GL_CALL3 ((void (WINAPI*)(uint32_t,uint32_t,uint32_t))real)(a0,a1,a2)
+#define GL_CALL4 ((void (WINAPI*)(uint32_t,uint32_t,uint32_t,uint32_t))real)(a0,a1,a2,a3)
+#define GL_CALL9 ((void (WINAPI*)(uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t))real)(a0,a1,a2,a3,a4,a5,a6,a7,a8)
+#define GL_SHIM(fn, n, ...)                                                          \
+    static void shim_##fn(void) {                                                    \
+        static FARPROC real;                                                         \
+        if (!real) real = gl_real(#fn);                                              \
+        uint32_t a[9] = {0};                                                         \
+        for (int i = 0; i < n; i++) a[i] = ARG(i);                                   \
+        uint32_t a0 = a[0], a1 = a[1], a2 = a[2], a3 = a[3], a4 = a[4], a5 = a[5], a6 = a[6], a7 = a[7], a8 = a[8]; \
+        (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6; (void)a7; (void)a8;                  \
+        if (g_gltrace) gl_note(__VA_ARGS__);                                         \
+        GL_CALL##n;                                                                  \
+        g_esp += 4 + n * 4;                                                          \
+    }
+GL_SHIM(glEnable, 1, "glEnable %04X", a0)
+GL_SHIM(glDisable, 1, "glDisable %04X", a0)
+GL_SHIM(glTexEnvi, 3, "glTexEnvi %04X %04X %04X", a0, a1, a2)
+GL_SHIM(glTexParameteri, 3, "glTexParameteri %04X %04X %04X", a0, a1, a2)
+GL_SHIM(glTexGeni, 3, "glTexGeni %04X %04X %04X", a0, a1, a2)
+GL_SHIM(glBindTexture, 2, "glBindTexture %04X %u", a0, a1)
+static uint32_t g_cp, g_cs;   /* the colour array: pointer, stride (traced draws show their first vertex colour) */
+static uint32_t vcol(uint32_t a1, uint32_t a2, uint32_t a3) {
+    if (!g_cp || !a1 || !a3) return 0;
+    uint32_t i = a2 == 0x1403 ? *(const uint16_t*)(uintptr_t)a3 : a2 == 0x1405 ? *(const uint32_t*)(uintptr_t)a3 : *(const uint8_t*)(uintptr_t)a3;
+    return *(const uint32_t*)(uintptr_t)(g_cp + i * (g_cs ? g_cs : 4));
+}
+static void shim_glDrawElements(void) {
+    static FARPROC real;
+    if (!real) real = gl_real("glDrawElements");
+    uint32_t a0 = ARG(0), a1 = ARG(1), a2 = ARG(2), a3 = ARG(3);
+    if (g_gltrace) gl_note("glDrawElements %04X n%u %04X vc%08X", a0, a1, a2, vcol(a1, a2, a3));
+    if (g_gltrace == 2) {   /* --gltex: what the driver holds for the bound texture */
+        static void (WINAPI *get_iv)(uint32_t, int*);
+        static void (WINAPI *get_tl)(uint32_t, int, uint32_t, int*);
+        static void (WINAPI *get_tp)(uint32_t, uint32_t, int*);
+        if (!get_iv) get_iv = (void*)gl_real("glGetIntegerv"), get_tl = (void*)gl_real("glGetTexLevelParameteriv"),
+                     get_tp = (void*)gl_real("glGetTexParameteriv");
+        int id = 0, w0 = 0, h0 = 0, f0 = 0, w1 = 0, minf = 0, en = 0, src = 0;
+        get_iv(0x8069, &id);         /* GL_TEXTURE_BINDING_2D */
+        get_iv(0x0DE1, &en);
+        get_iv(0x0BE1, &src);
+        get_tl(0x0DE1, 0, 0x1000, &w0); get_tl(0x0DE1, 0, 0x1001, &h0); get_tl(0x0DE1, 0, 0x1003, &f0);
+        get_tl(0x0DE1, 1, 0x1000, &w1);
+        get_tp(0x0DE1, 0x2801, &minf);
+        int maxl = 0;
+        get_tp(0x0DE1, 0x813D, &maxl);
+        gl_note("  tex %d en%d blendsrc %04X: %dx%d if%04X lv1w%d min%04X max%d", id, en, src, w0, h0, f0, w1, minf, maxl);
+    }
+    ((void (WINAPI*)(uint32_t, uint32_t, uint32_t, uint32_t))real)(a0, a1, a2, a3);
+    g_esp += 4 + 4 * 4;
+}
+GL_SHIM(glDrawArrays, 3, "glDrawArrays %04X %u n%u", a0, a1, a2)
+GL_SHIM(glEnableClientState, 1, "glEnableClientState %04X", a0)
+GL_SHIM(glDisableClientState, 1, "glDisableClientState %04X", a0)
+GL_SHIM(glBlendFunc, 2, "glBlendFunc %04X %04X", a0, a1)
+GL_SHIM(glTexCoordPointer, 4, "glTexCoordPointer %u %04X s%u", a0, a1, a2)
+static double u2f(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }
+static double pf(uint32_t p, int i) { return p ? ((const float*)(uintptr_t)p)[i] : -1; }
+GL_SHIM(glColorMask, 4, "glColorMask %u %u %u %u", a0, a1, a2, a3)
+GL_SHIM(glDepthMask, 1, "glDepthMask %u", a0)
+GL_SHIM(glDepthFunc, 1, "glDepthFunc %04X", a0)
+GL_SHIM(glColorPointer, 4, "glColorPointer %u %04X s%u", (g_cp = a3, g_cs = a2, a0), a1, a2)
+GL_SHIM(glColor4f, 4, "glColor4f %.2f %.2f %.2f %.2f", u2f(a0), u2f(a1), u2f(a2), u2f(a3))
+GL_SHIM(glColorMaterial, 2, "glColorMaterial %04X %04X", a0, a1)
+GL_SHIM(glMaterialfv, 3, "glMaterialfv %04X %04X %.2f %.2f %.2f %.2f", a0, a1, pf(a2, 0), pf(a2, 1), pf(a2, 2), pf(a2, 3))
+GL_SHIM(glLightfv, 3, "glLightfv %04X %04X %.2f %.2f %.2f %.2f", a0, a1, pf(a2, 0), pf(a2, 1), pf(a2, 2), pf(a2, 3))
+GL_SHIM(glLightModelfv, 2, "glLightModelfv %04X %.2f %.2f %.2f %.2f", a0, pf(a1, 0), pf(a1, 1), pf(a1, 2), pf(a1, 3))
+GL_SHIM(glAlphaFunc, 2, "glAlphaFunc %04X %.2f", a0, u2f(a1))
+GL_SHIM(glTexSubImage2D, 9, "glTexSubImage2D %04X lv%u %u,%u %ux%u %04X %04X", a0, a1, a2, a3, a4, a5, a6, a7)
+/* SC4 uploads only level 0 of its terrain textures and never sets their min
+ * filter, so they keep GL's default GL_NEAREST_MIPMAP_LINEAR: incomplete
+ * without mipmaps, and today's drivers sample them white (white city terrain,
+ * --original too). Capping GL_TEXTURE_MAX_LEVEL at the highest level uploaded
+ * makes them complete under any filter. */
+static void shim_glTexImage2D(void) {
+    static FARPROC real;
+    static void (WINAPI *tex_pi)(uint32_t, uint32_t, int);
+    if (!real) real = gl_real("glTexImage2D"), tex_pi = (void*)gl_real("glTexParameteri");
+    uint32_t a[9];
+    for (int i = 0; i < 9; i++) a[i] = ARG(i);
+    if (g_gltrace) gl_note("glTexImage2D %04X lv%u if%04X %ux%u b%u %04X %04X", a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]);
+    ((void (WINAPI*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t))real)
+        (a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8]);
+    if (a[0] == 0x0DE1) tex_pi(0x0DE1, 0x813D /* GL_TEXTURE_MAX_LEVEL */, (int)a[1]);
+    g_esp += 4 + 9 * 4;
+}
+
+static void shim_glTexEnvfv(void) {
+    static FARPROC real;
+    if (!real) real = gl_real("glTexEnvfv");
+    uint32_t t = ARG(0), p = ARG(1);
+    const float* v = (const float*)(uintptr_t)ARG(2);
+    if (g_gltrace) gl_note("glTexEnvfv %04X %04X %.2f %.2f %.2f %.2f", t, p, v[0], v[1], v[2], v[3]);
+    ((void (WINAPI*)(uint32_t, uint32_t, const float*))real)(t, p, v);
+    g_esp += 4 + 3 * 4;
+}
+
+/* Extension entry points the guest calls straight through the pointer
+ * wglGetProcAddress gave it; under --gltrace it gets these wrappers instead
+ * (and always the compressed upload, for its GL_TEXTURE_MAX_LEVEL cap). */
+typedef void (WINAPI *cti2d_t)(uint32_t, int, uint32_t, int, int, int, int, const void*);
+static cti2d_t real_cti2d;
+static void WINAPI trace_cti2d(uint32_t t, int lv, uint32_t f, int w, int h, int b, int n, const void* d) {
+    static void (WINAPI *tex_pi)(uint32_t, uint32_t, int);
+    if (!tex_pi) tex_pi = (void*)gl_real("glTexParameteri");
+    if (g_gltrace) gl_note("glCompressedTexImage2D %04X lv%d if%04X %dx%d %dB", t, lv, f, w, h, n);
+    real_cti2d(t, lv, f, w, h, b, n, d);
+    if (t == 0x0DE1) tex_pi(0x0DE1, 0x813D, lv);   /* the same cap as shim_glTexImage2D */
+}
+typedef void (WINAPI *at_t)(uint32_t);
+static at_t real_at;
+static void WINAPI trace_at(uint32_t u) { gl_note("glActiveTexture %04X", u); real_at(u); }
+static at_t real_cat;
+typedef uint32_t (WINAPI *g7_t)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+static g7_t real_rbr, real_dbr, real_nbr, real_la, real_ua;
+static uint32_t WINAPI trace_nbr(uint32_t t) { uint32_t r = ((uint32_t (WINAPI*)(uint32_t))real_nbr)(t); gl_note("glNewBufferRegion %04X -> %u", t, r); return r; }
+static void WINAPI trace_rbr(uint32_t r, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    gl_note("glReadBufferRegion %u %u,%u %ux%u", r, x, y, w, h);
+    ((void (WINAPI*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t))real_rbr)(r, x, y, w, h);
+}
+static void WINAPI trace_dbr(uint32_t r, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t dx, uint32_t dy) {
+    gl_note("glDrawBufferRegion %u %u,%u %ux%u -> %u,%u", r, x, y, w, h, dx, dy);
+    real_dbr(r, x, y, w, h, dx, dy);
+}
+static void WINAPI trace_la(uint32_t f, uint32_t n) { gl_note("glLockArrays %u n%u", f, n); ((void (WINAPI*)(uint32_t, uint32_t))real_la)(f, n); }
+static void WINAPI trace_ua(void) { gl_note("glUnlockArrays"); ((void (WINAPI*)(void))real_ua)(); }
+static void WINAPI trace_cat(uint32_t u) { gl_note("glClientActiveTexture %04X", u); real_cat(u); }
+
+static void shim_wglGetProcAddress(void) {
+    const char* name = (const char*)(uintptr_t)ARG(0);
+    PROC p = wglGetProcAddress(name);
+    if (p && !strcmp(name, "glCompressedTexImage2DARB")) real_cti2d = (cti2d_t)p, p = (PROC)trace_cti2d;
+    else if (g_gltrace && p) {
+        gl_note("wglGetProcAddress %s", name);
+        if (!strcmp(name, "glActiveTextureARB")) real_at = (at_t)p, p = (PROC)trace_at;
+        else if (!strcmp(name, "glNewBufferRegion")) real_nbr = (g7_t)p, p = (PROC)trace_nbr;
+        else if (!strcmp(name, "glReadBufferRegion")) real_rbr = (g7_t)p, p = (PROC)trace_rbr;
+        else if (!strcmp(name, "glDrawBufferRegion")) real_dbr = (g7_t)p, p = (PROC)trace_dbr;
+        else if (!strcmp(name, "glLockArraysEXT")) real_la = (g7_t)p, p = (PROC)trace_la;
+        else if (!strcmp(name, "glUnlockArraysEXT")) real_ua = (g7_t)p, p = (PROC)trace_ua;
+        else if (!strcmp(name, "glClientActiveTextureARB")) real_cat = (at_t)p, p = (PROC)trace_cat;
+    }
+    g_eax = (uint32_t)(uintptr_t)p;
+    g_esp += 4 + 1 * 4;
+}
+
 static void shim_TerminateProcess(void) {
     HANDLE h = (HANDLE)(uintptr_t)ARG(0);
     UINT code = ARG(1);
@@ -393,8 +668,38 @@ static native32_shim_t g_shims[] = {
     { "MessageBoxA", shim_MessageBoxA },
     { "SetWindowPos", shim_SetWindowPos },
     { "MoveWindow", shim_MoveWindow },
+    { "GetCursorPos", shim_GetCursorPos },
+    { "GetAsyncKeyState", shim_GetAsyncKeyState },
+    { "GetKeyState", shim_GetKeyState },
     { "SwapBuffers", shim_SwapBuffers },
     { "BitBlt", shim_BitBlt },
+    { "glGetString", shim_glGetString },
+    { "glEnable", shim_glEnable },
+    { "glDisable", shim_glDisable },
+    { "glTexEnvi", shim_glTexEnvi },
+    { "glTexEnvfv", shim_glTexEnvfv },
+    { "glTexParameteri", shim_glTexParameteri },
+    { "glTexGeni", shim_glTexGeni },
+    { "glTexImage2D", shim_glTexImage2D },
+    { "glBindTexture", shim_glBindTexture },
+    { "glDrawElements", shim_glDrawElements },
+    { "glDrawArrays", shim_glDrawArrays },
+    { "glEnableClientState", shim_glEnableClientState },
+    { "glDisableClientState", shim_glDisableClientState },
+    { "glBlendFunc", shim_glBlendFunc },
+    { "glTexCoordPointer", shim_glTexCoordPointer },
+    { "glTexSubImage2D", shim_glTexSubImage2D },
+    { "glColorMask", shim_glColorMask },
+    { "glDepthMask", shim_glDepthMask },
+    { "glDepthFunc", shim_glDepthFunc },
+    { "glColorPointer", shim_glColorPointer },
+    { "glColor4f", shim_glColor4f },
+    { "glColorMaterial", shim_glColorMaterial },
+    { "glMaterialfv", shim_glMaterialfv },
+    { "glLightfv", shim_glLightfv },
+    { "glLightModelfv", shim_glLightModelfv },
+    { "glAlphaFunc", shim_glAlphaFunc },
+    { "wglGetProcAddress", shim_wglGetProcAddress },
     { "ExitProcess", shim_ExitProcess },
     { "TerminateProcess", shim_TerminateProcess },
     { "ChangeDisplaySettingsA", shim_ChangeDisplaySettingsA },
@@ -410,6 +715,23 @@ static native32_shim_t g_shims[] = {
     { "RegSetValueExA", shim_RegSetValueExA },
     { "RegCloseKey", shim_RegCloseKey },
 };
+
+/* --noshim A,B: those imports go straight to Windows (to find a shim that
+ * breaks a run). Dropped entries move to the end, past the count. */
+static char g_noshim[512];
+static int shim_count(void) {
+    int n = (int)(sizeof g_shims / sizeof g_shims[0]);
+    for (int i = 0; i < n; ) {
+        const char* h = strstr(g_noshim, g_shims[i].name);
+        size_t k = strlen(g_shims[i].name);
+        if (h && (h == g_noshim || h[-1] == ',') && (h[k] == ',' || !h[k])) {
+            native32_shim_t t = g_shims[i];
+            g_shims[i] = g_shims[--n];
+            g_shims[n] = t;
+        } else i++;
+    }
+    return n;
+}
 
 /* ---- muted by default (kotor's: the process's own audio session) ------------ */
 static const GUID kCLSID_MMDeviceEnumerator =
@@ -524,13 +846,17 @@ static LONG CALLBACK crash(EXCEPTION_POINTERS* ep) {
  * (0x0087AF13): 1 COM and plugins, 3-4 the app's own init, 5-6 running. Each
  * change is a milestone line. ponytail: polled every 5 ms, so a phase that
  * lasts less than that can be missed; hook 0x0087AF13 if that matters. */
+static int readable(uint32_t a, uint32_t n);
+
 static DWORD WINAPI phase_watch(LPVOID unused) {
     (void)unused;
     int last = -1;
     for (;;) {
+        if (!readable(0x00B540ACu, 4)) { Sleep(5); continue; }   /* --original maps the image later */
         uint32_t fw = MEM32(0x00B540ACu);
         int ph = fw ? (int)MEM32(fw + 0xCC) : -1;
         if (ph != last) {
+            if (ph == 7) input_main_loop();
             printf("[host] framework phase %d", ph);
             if (fw) printf(" (framework 0x%08X, vtable 0x%08X)", fw, MEM32(fw));
             printf("\n");
@@ -605,6 +931,7 @@ int main(int argc, char** argv) {
     int run = 0, sound = 0, user_docs = 0;
     for (int i = 1; i < argc; i++) {
         int n = recomp_trace_arg(argc, argv, i);
+        if (!n) n = input_arg(argc, argv, i);
         if (n) { i += n - 1; continue; }
         if (!strcmp(argv[i], "--run")) run = 1;
         else if (!strcmp(argv[i], "--sound")) sound = 1;
@@ -626,6 +953,13 @@ int main(int argc, char** argv) {
             printf("  windows on display %d: %ld,%ld %ldx%ld\n", want, g_mon.left, g_mon.top,
                    g_mon.right - g_mon.left, g_mon.bottom - g_mon.top);
         }
+        else if (!strcmp(argv[i], "--gl-only") && i + 1 < argc) strncpy(g_gl_only, argv[++i], sizeof g_gl_only - 1);
+        else if (!strcmp(argv[i], "--gltrace")) g_gltrace = 1;
+        else if (!strcmp(argv[i], "--gltex")) g_gltrace = 2;
+        else if (!strcmp(argv[i], "--gltrace-busy") && i + 1 < argc) { char* e; g_gltrace = 1; g_gltrace_busy = strtol(argv[++i], &e, 0); if (*e == '@') g_busy_after = strtol(e + 1, NULL, 0); }
+        else if (!strcmp(argv[i], "--gltrace-frame") && i + 1 < argc) g_gltrace = 1, g_gltrace_frame = strtol(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--noshim") && i + 1 < argc) strncpy(g_noshim, argv[++i], sizeof g_noshim - 1);
+        else if (!strcmp(argv[i], "--gl-hide") && i + 1 < argc) strncpy(g_gl_hide, argv[++i], sizeof g_gl_hide - 1);
         else if (!strcmp(argv[i], "--spy") && i + 1 < argc) g_spy_func = strtoul(argv[++i], NULL, 16);
         else if (!strcmp(argv[i], "--modeswitch")) g_modeswitch = 1;
         else if (!strcmp(argv[i], "--gamma")) g_gamma = 1;
@@ -636,8 +970,9 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--native-trace")) native32_trace_native = 1;
         else if (!strcmp(argv[i], "--callbacks")) native32_trace_callbacks = 1;
         else {
-            printf("usage: sc4 [--run] [--headless] [--sound] [--modeswitch] [--gamma] [--original] [--user-docs] [--trace-init] [--spy VA] [--monitor N] [--snap DIR] [--snap-every N] [--exe work\\sc4.exe] [--game game]\n"
+            printf("usage: sc4 [--run] [--headless] [--sound] [--modeswitch] [--gamma] [--original] [--user-docs] [--trace-init] [--spy VA] [--monitor N] [--gl-hide EXT,...] [--gl-only EXT,...] [--gltrace] [--gltex] [--gltrace-frame N] [--gltrace-busy DRAWS[@FRAME]] [--noshim NAME,...] [--snap DIR] [--snap-every N] [--exe work\\sc4.exe] [--game game]\n"
                    "           [--args \"-intro:off -w\"] [--watchdog S] [--native-trace] [--callbacks]\n");
+            input_help();
             recomp_trace_help();
             return argv[i][1] == 'h' || argv[i][2] == 'h' ? 0 : 1;
         }
@@ -672,7 +1007,9 @@ int main(int argc, char** argv) {
         CoInitialize(NULL);
         if (!sound) mute_process();
         if (g_watchdog_s) CloseHandle(CreateThread(NULL, 0, watchdog, NULL, 0, NULL));
-        return oracle_run(exe_full, SC4_IMAGE_BASE, g_shims, (int)(sizeof g_shims / sizeof g_shims[0]), NULL, 0);
+        CloseHandle(CreateThread(NULL, 0, phase_watch, NULL, 0, NULL));   /* starts the input clock */
+        input_start();
+        return oracle_run(exe_full, SC4_IMAGE_BASE, g_shims, shim_count(), NULL, 0);
     }
 
     native32_init();
@@ -682,7 +1019,7 @@ int main(int argc, char** argv) {
     uint32_t span = native32_map(exe_full, SC4_IMAGE_BASE);
     if (!span) { fprintf(stderr, "cannot map %s at 0x%08X\n", exe_full, SC4_IMAGE_BASE); return 1; }
     printf("  mapped %s: 0x%08X-0x%08X\n", exe, SC4_IMAGE_BASE, SC4_IMAGE_BASE + span);
-    if (native32_bind(SC4_IMAGE_BASE, g_shims, (int)(sizeof g_shims / sizeof g_shims[0]))) return 1;
+    if (native32_bind(SC4_IMAGE_BASE, g_shims, shim_count())) return 1;
     printf("  guest command line %s\n", g_guest_cmdline);
 
     if (!run) {
@@ -704,6 +1041,7 @@ int main(int argc, char** argv) {
     }
     if (g_watchdog_s) CloseHandle(CreateThread(NULL, 0, watchdog, NULL, 0, NULL));
     CloseHandle(CreateThread(NULL, 0, phase_watch, NULL, 0, NULL));
+    input_start();
     printf("  entering 0x%08X\n\n", sc4_entry_va);
     fflush(stdout);
     native32_call_guest(sc4_entry_va, 0, NULL);
