@@ -143,6 +143,9 @@ the rest through `_initterm`'s constructor table and the GZCOM vtables.
    into vertex colours and draws them with `LIGHT0` on, `COLOR_MATERIAL` and a 1.0 global
    ambient, but never calls `glLightfv`, so GL's default white diffuse and specular add
    on top. The host's `glLightModelfv` shim zeroes `LIGHT0`'s diffuse and specular.
+   Lots and building sprites drew as black squares: SC4 uploads DXT1 as
+   `GL_COMPRESSED_RGB_S3TC_DXT1` (83F0), which turns DXT1's cut-out texels black; Direct3D
+   keeps them transparent. The compressed upload shim asks for RGBA DXT1 (83F1) instead.
    Scripted input (`src/runtime/input.c`) gets there: `--click 616,330@10 --click 716,321@22
    --click 775,222@30` = main menu, Timbuktu, Getting Started, Start New City.
 

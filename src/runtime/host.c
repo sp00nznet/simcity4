@@ -619,6 +619,11 @@ static void WINAPI trace_cti2d(uint32_t t, int lv, uint32_t f, int w, int h, int
     static void (WINAPI *tex_pi)(uint32_t, uint32_t, int);
     if (!tex_pi) tex_pi = (void*)gl_real("glTexParameteri");
     if (g_gltrace) gl_note("glCompressedTexImage2D %04X lv%d if%04X %dx%d %dB", t, lv, f, w, h, n);
+    /* DXT1 as RGB (83F0) turns its cut-out texels black (black squares
+     * around trees and buildings, --original too); Direct3D's DXT1 always
+     * keeps them transparent, so ask for RGBA DXT1 (83F1). Opaque texels
+     * decode the same either way. */
+    if (f == 0x83F0) f = 0x83F1;
     real_cti2d(t, lv, f, w, h, b, n, d);
     if (t == 0x0DE1) tex_pi(0x0DE1, 0x813D, lv);   /* the same cap as shim_glTexImage2D */
 }
@@ -972,8 +977,8 @@ int main(int argc, char** argv) {
         }
         else if (!strcmp(argv[i], "--gl-only") && i + 1 < argc) strncpy(g_gl_only, argv[++i], sizeof g_gl_only - 1);
         else if (!strcmp(argv[i], "--gltrace")) g_gltrace = 1;
-        else if (!strcmp(argv[i], "--gltex")) g_gltrace = 2;
-        else if (!strcmp(argv[i], "--gltrace-busy") && i + 1 < argc) { char* e; g_gltrace = 1; g_gltrace_busy = strtol(argv[++i], &e, 0); if (*e == '@') g_busy_after = strtol(e + 1, NULL, 0); }
+        else if (!strcmp(argv[i], "--gltex")) g_gltrace = 2;   /* before --gltrace-busy */
+        else if (!strcmp(argv[i], "--gltrace-busy") && i + 1 < argc) { char* e; if (!g_gltrace) g_gltrace = 1; g_gltrace_busy = strtol(argv[++i], &e, 0); if (*e == '@') g_busy_after = strtol(e + 1, NULL, 0); }
         else if (!strcmp(argv[i], "--gltrace-frame") && i + 1 < argc) g_gltrace = 1, g_gltrace_frame = strtol(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--noshim") && i + 1 < argc) strncpy(g_noshim, argv[++i], sizeof g_noshim - 1);
         else if (!strcmp(argv[i], "--gl-hide") && i + 1 < argc) strncpy(g_gl_hide, argv[++i], sizeof g_gl_hide - 1);
