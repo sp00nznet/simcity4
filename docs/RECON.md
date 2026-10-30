@@ -138,7 +138,11 @@ the rest through `_initterm`'s constructor table and the GZCOM vtables.
    The host's `glTexImage2D` / `glCompressedTexImage2DARB` shims now cap
    `GL_TEXTURE_MAX_LEVEL` at the level uploaded. Found with `--gltrace-busy 100@1500`
    (every GL call in the first busy city frame) and `--gltex` (what the driver holds for
-   the texture each draw samples). Water still looks pale: next.
+   the texture each draw samples).
+   Water was pale and the terrain grey-washed: SC4 lights terrain and water on the CPU
+   into vertex colours and draws them with `LIGHT0` on, `COLOR_MATERIAL` and a 1.0 global
+   ambient, but never calls `glLightfv`, so GL's default white diffuse and specular add
+   on top. The host's `glLightModelfv` shim zeroes `LIGHT0`'s diffuse and specular.
    Scripted input (`src/runtime/input.c`) gets there: `--click 616,330@10 --click 716,321@22
    --click 775,222@30` = main menu, Timbuktu, Getting Started, Start New City.
 

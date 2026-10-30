@@ -13,7 +13,7 @@
 
 ## Next
 - [x] OpenGL renderer path to the region view and a city (white terrain: texture max level)
-- [ ] OpenGL: water renders pale in the city view
+- [x] OpenGL: water renders pale in the city view (LIGHT0 left at GL defaults)
 - [ ] Load a city, run the simulation, save; compare against the original
 - [ ] `--headless --record out.mp4` (section 10)
 - [ ] netlab recipe and a QA pass on testbox

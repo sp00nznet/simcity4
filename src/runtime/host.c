@@ -562,7 +562,24 @@ GL_SHIM(glColor4f, 4, "glColor4f %.2f %.2f %.2f %.2f", u2f(a0), u2f(a1), u2f(a2)
 GL_SHIM(glColorMaterial, 2, "glColorMaterial %04X %04X", a0, a1)
 GL_SHIM(glMaterialfv, 3, "glMaterialfv %04X %04X %.2f %.2f %.2f %.2f", a0, a1, pf(a2, 0), pf(a2, 1), pf(a2, 2), pf(a2, 3))
 GL_SHIM(glLightfv, 3, "glLightfv %04X %04X %.2f %.2f %.2f %.2f", a0, a1, pf(a2, 0), pf(a2, 1), pf(a2, 2), pf(a2, 3))
-GL_SHIM(glLightModelfv, 2, "glLightModelfv %04X %.2f %.2f %.2f %.2f", a0, pf(a1, 0), pf(a1, 1), pf(a1, 2), pf(a1, 3))
+/* SC4 lights its terrain and water on the CPU, into vertex colours, and draws them
+ * with LIGHT0 enabled, COLOR_MATERIAL and a 1.0 global ambient: ambient alone
+ * gives back the vertex colour. It never calls glLightfv, so LIGHT0 keeps GL's
+ * white diffuse and specular and adds them on top: grey-washed terrain and pale
+ * water (--original too). Zero them.
+ * ponytail: would undo the game's own LIGHT0 if it ever set one before a
+ * glLightModelfv; none seen. */
+static void shim_glLightModelfv(void) {
+    static FARPROC real, lfv;
+    if (!real) real = gl_real("glLightModelfv"), lfv = gl_real("glLightfv");
+    uint32_t a0 = ARG(0), a1 = ARG(1);
+    if (g_gltrace) gl_note("glLightModelfv %04X %.2f %.2f %.2f %.2f", a0, pf(a1, 0), pf(a1, 1), pf(a1, 2), pf(a1, 3));
+    ((void (WINAPI*)(uint32_t, uint32_t))real)(a0, a1);
+    static const float black[4] = {0, 0, 0, 1};
+    ((void (WINAPI*)(uint32_t, uint32_t, const float*))lfv)(0x4000, 0x1201 /* DIFFUSE */, black);
+    ((void (WINAPI*)(uint32_t, uint32_t, const float*))lfv)(0x4000, 0x1202 /* SPECULAR */, black);
+    g_esp += 4 + 2 * 4;
+}
 GL_SHIM(glAlphaFunc, 2, "glAlphaFunc %04X %.2f", a0, u2f(a1))
 GL_SHIM(glTexSubImage2D, 9, "glTexSubImage2D %04X lv%u %u,%u %ux%u %04X %04X", a0, a1, a2, a3, a4, a5, a6, a7)
 /* SC4 uploads only level 0 of its terrain textures and never sets their min
